@@ -1,0 +1,18 @@
+Copyright (c) 2026 AHledger. All rights reserved.
+
+This repository contains the source code of AHledger sync and the AHledger addon. It is published
+so that anyone can read it, audit it, and build it for their own personal use in order to verify
+what the software does.
+
+No other license is granted. Without prior written permission from AHledger you may not copy,
+modify, merge, publish, distribute, sublicense, or sell copies of this software or of works based
+on it, except as needed to build and run it on your own computer for your own use.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT
+NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES
+OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+World of Warcraft is a trademark of Blizzard Entertainment, Inc. AHledger is not affiliated with
+or endorsed by Blizzard Entertainment.

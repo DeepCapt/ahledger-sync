@@ -1,0 +1,218 @@
+/* Brand tokens (brand guide v1.2): ink ground, orange mark only, mono for data. */
+:root {
+  --bg: #0b0b10;
+  --panel: #14141b;
+  --panel-2: #1c1c25;
+  --line: #2a2a36;
+  --text: #f2f2f5;
+  --text-2: #b0b0c0;
+  --muted: #7d7d90;
+  --orange: #ff9d2f;
+  --green: #4ade80;
+  --red: #f87171;
+  --font-ui: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  --font-mono: 'Cascadia Mono', 'JetBrains Mono', Consolas, monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+html,
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.45 var(--font-ui);
+}
+main {
+  padding: 18px 20px 28px;
+  max-width: 720px;
+  margin: 0 auto;
+}
+header.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+header.brand .mark {
+  width: 16px;
+  height: 16px;
+  background: var(--orange);
+  clip-path: polygon(25% 0, 100% 0, 100% 75%, 75% 100%, 0 100%, 0 25%);
+}
+header.brand h1 {
+  font-size: 15px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  margin: 0;
+  font-weight: 700;
+}
+header.brand .ver {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  margin-left: auto;
+}
+section {
+  background: var(--panel);
+  border-top: 3px solid var(--line);
+  padding: 14px 16px;
+  margin-bottom: 14px;
+}
+section > h2 {
+  margin: 0 0 10px;
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-2);
+  font-weight: 600;
+}
+label {
+  display: block;
+  font-size: 12px;
+  color: var(--text-2);
+  margin: 10px 0 4px;
+}
+input[type='text'],
+input[type='password'],
+select {
+  width: 100%;
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--line);
+  padding: 8px 10px;
+  font: 13px var(--font-mono);
+}
+input:focus,
+select:focus {
+  outline: 1px solid var(--orange);
+  outline-offset: 0;
+}
+.row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+}
+.row > * {
+  flex: 1;
+}
+.row > button {
+  flex: 0 0 auto;
+}
+button {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--line);
+  padding: 8px 12px;
+  font: 600 12px var(--font-ui);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+button.primary {
+  background: var(--text);
+  color: var(--bg);
+  border-color: var(--text);
+}
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  font-size: 13px;
+}
+.status {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-2);
+}
+.status b {
+  color: var(--text);
+  font-weight: 600;
+}
+.ok {
+  color: var(--green);
+}
+.err {
+  color: var(--red);
+}
+.update {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--orange);
+  border-left-width: 4px;
+  background: rgba(255, 157, 47, 0.08);
+  font-size: 13px;
+}
+.update .actions {
+  display: flex;
+  gap: 8px;
+}
+/* A refusal the player must act on: stays above the status until something succeeds. */
+.problem {
+  border: 1px solid var(--red);
+  border-left-width: 4px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  color: var(--text);
+  background: rgba(255, 80, 80, 0.08);
+}
+ul.log {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  max-height: 240px;
+  overflow: auto;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+ul.log li {
+  padding: 5px 0;
+  border-bottom: 1px solid var(--line);
+  color: var(--text-2);
+}
+ul.log li time {
+  color: var(--muted);
+  margin-right: 8px;
+}
+.actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+.hint {
+  color: var(--muted);
+  font-size: 12px;
+  margin: 6px 0 0;
+}
+
+/* Connect: the code to approve, and the manual key fields tucked under a disclosure. */
+.status b.code {
+  font-family: ui-monospace, 'JetBrains Mono', monospace;
+  font-size: 20px;
+  letter-spacing: 0.15em;
+}
+#connectBox .actions {
+  margin-top: 8px;
+}
+#manualKey {
+  margin-top: 14px;
+}
+#manualKey summary {
+  cursor: pointer;
+  color: var(--text-2, #b8b8c4);
+  font-size: 13px;
+}
+#manualKey[open] summary {
+  margin-bottom: 8px;
+}

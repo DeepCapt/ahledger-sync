@@ -1,0 +1,37 @@
+[package]
+name = "ahledger-sync"
+version = "0.2.18"
+description = "AHledger sync: uploads addon auction house scans to ahledger.com"
+authors = ["AHledger"]
+license = "MIT"
+edition = "2021"
+rust-version = "1.77"
+
+[lib]
+name = "ahledger_sync_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+notify = "6"
+notify-debouncer-mini = "0.4"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
+flate2 = "1"
+rand = "0.8"
+base64 = "0.22"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true

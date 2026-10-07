@@ -1,0 +1,23 @@
+{
+  "name": "ahledger-sync",
+  "version": "0.2.18",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@tauri-apps/api": "^2.0.0",
+    "@tauri-apps/plugin-dialog": "^2.0.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0",
+    "typescript": "~5.9.3",
+    "vite": "^7.0.0",
+    "vitest": "^5.0.1"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "tauri": "tauri",
+    "typecheck": "tsc --noEmit"
+  },
+  "license": "SEE LICENSE IN ../LICENSE"
+}

@@ -1,0 +1,5 @@
+node_modules/
+dist/
+sync/src-tauri/target/
+sync/src-tauri/gen/
+*.log

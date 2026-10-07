@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "AHledger sync main window: settings, file picker, and the native upload commands.",
+  "windows": ["main"],
+  "permissions": ["core:default", "dialog:allow-open"]
+}
