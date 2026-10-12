@@ -7,9 +7,14 @@
 
     AHledger  cost 1g 20s  ·  makes 2g 15s  ·  margin +95s (+79%)
 
+  At a glance (0.9.5): every recipe in the modern profession window's list carries a dot at its
+  right edge, green for a clear profit, grey for about even, yellow for a loss, red for a heavy
+  one, with a plus or minus beside it, and hovering the row shows the exact margin.
+
   Whole profession: the Crafting tab of the window lists every learned recipe of the open
-  profession with cost, value, and margin, sortable, and a shopping list of the reagents missing
-  from your bags for N crafts of the selected recipe.
+  profession with cost, value, and margin, sortable, a filter for recipes at or above a margin
+  percent, and a shopping list of the reagents missing from your bags for N crafts of the
+  selected recipe.
 
   Reagents with no price are listed as unknown and left out of the cost, so a margin is never
   overstated by a missing number. Works with the modern profession window (the Forever beta)
@@ -61,6 +66,66 @@ local function marginText(cost, total, margin, resultID)
   if pace then parts[#parts + 1] = NS.PaceColour(pace.tier) .. NS.PacePhrase(pace.tier) .. UI.R end
   return UI.ACCENT .. "AHledger" .. UI.R .. "  " .. table.concat(parts, "  " .. UI.GREY .. "·" .. UI.R .. "  ")
 end
+
+-- ---------------------------------------------------------------------------------------------
+-- Profit bands: one word per recipe, for the dot beside each recipe in the profession window
+-- and the filter on the Crafting tab. Measured in percent of reagent cost, since 20 copper is a
+-- lot on a bandage and nothing on a breastplate. Profit starts at +10%, not at zero: the auction
+-- house keeps a cut of every sale, so a recipe that clears a few percent on paper loses gold.
+-- A reader sent mockups of exactly this (0.9.5); the near-zero band was their idea.
+-- ---------------------------------------------------------------------------------------------
+
+NS.BAND_PROFIT_PCT = 10
+NS.BAND_EVEN_PCT = -5
+NS.BAND_LOSS_PCT = -30
+
+-- "profit" | "even" | "loss" | "heavy" | "unknown" for a recipe with cost, total, margin and
+-- missing set (CraftingTable rows, or anything shaped like one). unknown: a reagent or the
+-- result has no price, so the margin would be made up. nil for anything else. Pure.
+function NS.MarginBand(r)
+  if type(r) ~= "table" or type(r.cost) ~= "number" then return nil end
+  if (r.missing and #r.missing > 0) or type(r.total) ~= "number" or r.cost <= 0 then return "unknown" end
+  local pct = r.pct or ((r.total - r.cost) / r.cost * 100)
+  if pct >= NS.BAND_PROFIT_PCT then return "profit" end
+  if pct >= NS.BAND_EVEN_PCT then return "even" end
+  if pct >= NS.BAND_LOSS_PCT then return "loss" end
+  return "heavy"
+end
+
+-- "+34c (+16%)" or "-3s 12c (-51%)": the margin the way the hovered row shows it. nil when the
+-- result is unpriced. Pure.
+function NS.MarginShort(r)
+  if type(r) ~= "table" or type(r.total) ~= "number" or type(r.cost) ~= "number" then return nil end
+  local margin = r.margin or (r.total - r.cost)
+  local pct = r.cost > 0 and string.format(" (%+.0f%%)", margin / r.cost * 100) or ""
+  return (margin < 0 and "-" or "+") .. UI.PlainGold(math.abs(margin)) .. pct
+end
+
+-- Recipes whose margin is at least minPct percent of cost. Unpriced ones are left out, since
+-- nothing says they clear it. Pure.
+function NS.FilterRecipes(recipes, minPct)
+  minPct = tonumber(minPct) or 0
+  local out = {}
+  for _, r in ipairs(recipes or {}) do
+    if r.pct and r.pct >= minPct then out[#out + 1] = r end
+  end
+  return out
+end
+
+-- The dot and its sign per band. The sign is the second cue: red and green alone are one colour
+-- to roughly one man in twelve, and the game's fonts draw a box for most shape glyphs, so a plain
+-- plus and minus carry it. The fallback colours stand in if the client lacks the indicator art.
+local BAND = {
+  profit = { texture = "Interface\\COMMON\\Indicator-Green", sign = "+", colour = UI.UP, rgb = { 0.24, 0.86, 0.42 }, word = "profit" },
+  even = { texture = "Interface\\COMMON\\Indicator-Gray", sign = "", colour = UI.GREY, rgb = { 0.6, 0.6, 0.62 }, word = "about even" },
+  loss = { texture = "Interface\\COMMON\\Indicator-Yellow", sign = "-", colour = "|cffffd23f", rgb = { 1, 0.82, 0.25 }, word = "loss" },
+  heavy = { texture = "Interface\\COMMON\\Indicator-Red", sign = "-", colour = UI.DOWN, rgb = { 1, 0.3, 0.3 }, word = "heavy loss" },
+  unknown = { texture = "Interface\\COMMON\\Indicator-Gray", sign = "?", colour = UI.GREY, rgb = { 0.6, 0.6, 0.62 }, word = "unpriced" },
+}
+NS.BANDS = BAND
+
+-- The legend, for the option tip and the filter tip.
+NS.BAND_LEGEND = string.format("Green clears %d%% over reagent cost, grey is about even, yellow loses up to %d%%, red more than that, and a grey question mark means a reagent or the result has no price yet.", NS.BAND_PROFIT_PCT, -NS.BAND_LOSS_PCT)
 
 -- ---------------------------------------------------------------------------------------------
 -- Recipe readers: one shape for every client
@@ -255,11 +320,217 @@ local function describeRetail(form, recipeInfo)
   showLine(recipe)
 end
 
+-- ---------------------------------------------------------------------------------------------
+-- Profit dots in the recipe list (modern profession window)
+--
+-- Each recipe row gets a dot at its right edge in the band's colour, with a plus or minus beside
+-- it; hovering the row swaps the sign for the exact margin and opens a small tooltip with the
+-- cost, value, margin and sales pace. Rows are reused as the list scrolls, so the dot is set
+-- every time a row is initialised for a recipe, which is also how a fresh price table reaches it.
+-- ---------------------------------------------------------------------------------------------
+
+-- The recipe id a list row was initialised with: the tree node's data carries recipeInfo for a
+-- recipe and categoryInfo for a heading. nil for a heading or anything unexpected.
+local function recipeIdOf(node)
+  local data = node
+  if type(data) == "table" and type(data.GetData) == "function" then
+    local ok, d = pcall(data.GetData, data)
+    data = ok and d or nil
+  elseif type(data) == "table" and type(data.data) == "table" then
+    data = data.data
+  end
+  local info = type(data) == "table" and data.recipeInfo or nil
+  if type(info) ~= "table" then return nil end
+  -- The row shows the highest rank learned where recipes have ranks; price that one.
+  if Professions and Professions.GetHighestLearnedRecipe then
+    local ok, best = pcall(Professions.GetHighestLearnedRecipe, info)
+    if ok and type(best) == "table" and best.recipeID then info = best end
+  end
+  return tonumber(info.recipeID)
+end
+
+local DOT_SIZE, DOT_INSET, SIGN_GAP = 12, 4, 1
+
+-- The room the dot and sign take at the right of a row.
+local function indicatorWidth(frame)
+  return DOT_SIZE + DOT_INSET + SIGN_GAP + (frame.AHledgerSign:GetStringWidth() or 0) + 4
+end
+
+-- The row sizes its name to the room left of the craftable count and the lock icon
+-- (ProfessionsRecipeListRecipeMixin:Init); the dot and sign take their share off the right, so a
+-- long name shortens instead of running under them. Set after Init, so it holds.
+local function fitLabel(frame)
+  local label = frame.Label
+  if type(label) ~= "table" or not label.GetStringWidth or not frame.AHledgerSign then return end
+  local shown = function(f) return type(f) == "table" and f.IsShown and f:IsShown() end
+  local count = shown(frame.Count) and (frame.Count:GetStringWidth() or 0) or 0
+  local locked = shown(frame.LockedIcon) and (frame.LockedIcon:GetWidth() or 0) or 0
+  local skill = (type(frame.SkillUps) == "table" and frame.SkillUps.GetWidth) and (frame.SkillUps:GetWidth() or 0) or 0
+  local width = frame:GetWidth() or 0
+  local room = width - (locked + count + 10 + skill) - indicatorWidth(frame)
+  -- Measured at full width first, the way the row's own Init does, so a name already cut short
+  -- reports its whole length.
+  if width > 0 and label.SetWidth then label:SetWidth(width) end
+  label:SetWidth(math.max(1, math.min(label:GetStringWidth() or 0, room)))
+end
+
+local function showSign(frame)
+  local v = BAND[frame.AHledgerBand]
+  if v and frame.AHledgerSign then frame.AHledgerSign:SetText(v.colour .. v.sign .. UI.R) end
+end
+
+-- Hover: the sign gives way to the exact margin, and a small tooltip carries the cost, value,
+-- margin and sales pace. The row shows no tooltip of its own unless its name is cut short, in
+-- which case the lines join that one.
+local function onRowEnter(frame)
+  local r = frame.AHledgerRecipe
+  if not r or not frame.AHledgerBand then return end
+  local short = NS.MarginShort(r)
+  if short then
+    frame.AHledgerSign:SetText((BAND[frame.AHledgerBand] or BAND.unknown).colour .. short .. UI.R)
+    fitLabel(frame)
+  end
+  local tip = GameTooltip
+  if tip:IsShown() and tip:GetOwner() == frame.Label then
+    tip:AddLine(" ")
+  else
+    tip:SetOwner(frame, "ANCHOR_RIGHT")
+    tip:SetText(r.name or "", 1, 1, 1)
+  end
+  tip:AddLine(marginText(r.cost, r.total, r.margin, r.resultID), nil, nil, nil, true)
+  if r.missing and #r.missing > 0 then
+    tip:AddLine(UI.GREY .. "no price for " .. table.concat(r.missing, ", ") .. UI.R, nil, nil, nil, true)
+  end
+  tip:Show()
+end
+
+local function onRowLeave(frame)
+  if not frame.AHledgerSign then return end
+  showSign(frame)
+  fitLabel(frame)
+end
+-- Public for the harness.
+NS.RecipeRowEnter, NS.RecipeRowLeave = onRowEnter, onRowLeave
+
+local function hideDot(frame)
+  frame.AHledgerRecipe, frame.AHledgerBand = nil, nil
+  if frame.AHledgerDot then
+    frame.AHledgerDot:Hide()
+    frame.AHledgerSign:SetText("")
+  end
+end
+
+-- The dot sits at the row's right edge, or left of the lock icon when the recipe is locked,
+-- since Blizzard anchors that icon to the same edge.
+local function placeDot(frame)
+  local dot = frame.AHledgerDot
+  local lock = frame.LockedIcon
+  local locked = type(lock) == "table" and lock.IsShown and lock:IsShown()
+  if (locked and true or false) == (frame.AHledgerDotLocked or false) and frame.AHledgerDotPlaced then return end
+  frame.AHledgerDotLocked, frame.AHledgerDotPlaced = locked and true or false, true
+  dot:ClearAllPoints()
+  if locked then
+    dot:SetPoint("RIGHT", lock, "LEFT", -2, 0)
+  else
+    dot:SetPoint("RIGHT", frame, "RIGHT", -DOT_INSET, 0)
+  end
+end
+
+local function ensureDot(frame)
+  if frame.AHledgerDot then return end
+  -- Drawn on the same layer and sublevel as the row's own label, so the selected and hover
+  -- overlays treat the dot and sign the way they treat the name.
+  local dot = frame:CreateTexture(nil, "OVERLAY", nil, 1)
+  dot:SetSize(DOT_SIZE, DOT_SIZE)
+  local sign = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+  sign:SetDrawLayer("OVERLAY", 1)
+  sign:SetPoint("RIGHT", dot, "LEFT", -SIGN_GAP, 0)
+  sign:SetJustifyH("RIGHT")
+  sign:SetWordWrap(false)
+  frame.AHledgerDot, frame.AHledgerSign = dot, sign
+  -- The row's OnLeave is set once by its template and never replaced, so a hook on it holds.
+  -- OnEnter is not: the list sets it afresh each time a row is filled, and SetScript drops any
+  -- hook on the handler, so hovering is caught on the mixin method instead (hookRecipeList).
+  frame:HookScript("OnLeave", onRowLeave)
+end
+
+-- Sets or clears one row's dot. Public for the harness.
+function NS.DecorateRecipeRow(frame, node)
+  if type(frame) ~= "table" then return end
+  local recipeID = (NS.Setting("crafting") and NS.Setting("craftDots")) and recipeIdOf(node) or nil
+  local recipe = recipeID and modernRecipe(recipeID) or nil
+  if not recipe or #recipe.reagents == 0 then
+    hideDot(frame)
+    return
+  end
+  ensureDot(frame)
+  local cost, missing, total, margin = economics(recipe.reagents, recipe.resultID, recipe.made, NS.Market())
+  recipe.cost, recipe.missing, recipe.total, recipe.margin = cost, missing, total, margin
+  frame.AHledgerRecipe = recipe
+  frame.AHledgerBand = NS.MarginBand(recipe) or "unknown"
+  local v = BAND[frame.AHledgerBand]
+  -- SetTexture answers false when the file is missing; then a plain square in the band colour.
+  if frame.AHledgerDot:SetTexture(v.texture) == false then
+    frame.AHledgerDot:SetColorTexture(v.rgb[1], v.rgb[2], v.rgb[3])
+  end
+  placeDot(frame)
+  frame.AHledgerDot:Show()
+  showSign(frame)
+  fitLabel(frame)
+end
+
+local function recipeScrollBox()
+  local page = ProfessionsFrame and ProfessionsFrame.CraftingPage
+  local list = page and page.RecipeList
+  return list and list.ScrollBox or nil
+end
+
+-- Every visible row again: after a setting change, and whenever the list lays itself out.
+function NS.RefreshRecipeDots()
+  local box = recipeScrollBox()
+  if not box or not box.ForEachFrame then return end
+  pcall(box.ForEachFrame, box, function(frame, node) NS.DecorateRecipeRow(frame, node) end)
+end
+
+local function hookRecipeList()
+  -- The list fires OnInitializedFrame for every row it fills, after the row's own Init, which
+  -- is the hook Blizzard provides for addons. Callbacks arrive as (owner, frame, elementData).
+  local box = recipeScrollBox()
+  local event = ScrollBoxListMixin and ScrollBoxListMixin.Event and ScrollBoxListMixin.Event.OnInitializedFrame
+  if box and box.RegisterCallback and event and not hooked.box then
+    hooked.box = true
+    pcall(box.RegisterCallback, box, event, function(a, b, c)
+      -- The registry puts the owner first; a client that leaves it out puts the frame first.
+      local frame, node = a, b
+      if a == hooked then frame, node = b, c end
+      pcall(NS.DecorateRecipeRow, frame, node)
+    end, hooked)
+  end
+  -- And the row mixin's Init: hooked before the window first shows, it reaches every row, since
+  -- rows take their methods from the mixin as they are created. Both paths set the same dot, so a
+  -- client that has only one of them still gets it.
+  if ProfessionsRecipeListRecipeMixin and ProfessionsRecipeListRecipeMixin.Init and not hooked.rows then
+    hooked.rows = true
+    hooksecurefunc(ProfessionsRecipeListRecipeMixin, "Init", function(frame, node) pcall(NS.DecorateRecipeRow, frame, node) end)
+    -- Hover: the list's own OnEnter handler calls the mixin's OnEnter through the mixin table
+    -- each time, so a hook there reaches every row, however early it was created, and survives
+    -- the handler being set again. OnLeave the same way, for the lock and skill-up buttons,
+    -- which call the row's OnLeave method rather than its handler.
+    if ProfessionsRecipeListRecipeMixin.OnEnter then
+      hooksecurefunc(ProfessionsRecipeListRecipeMixin, "OnEnter", function(frame) pcall(onRowEnter, frame) end)
+    end
+    if ProfessionsRecipeListRecipeMixin.OnLeave then
+      hooksecurefunc(ProfessionsRecipeListRecipeMixin, "OnLeave", function(frame) pcall(onRowLeave, frame) end)
+    end
+  end
+end
+
 function NS.HookCrafting()
   if ProfessionsFrame and ProfessionsFrame.CraftingPage and ProfessionsFrame.CraftingPage.SchematicForm and not hooked.retail then
     hooked.retail = true
     hooksecurefunc(ProfessionsFrame.CraftingPage.SchematicForm, "Init", describeRetail)
   end
+  if ProfessionsFrame then hookRecipeList() end
   if TradeSkillFrame and TradeSkillFrame_SetSelection and not hooked.tradeskill then
     hooked.tradeskill = true
     hooksecurefunc("TradeSkillFrame_SetSelection", function(index)
@@ -318,29 +589,67 @@ local function refresh()
     tab.computedAt = NS.Now()
   end
   tab.craftsBox:SetText(tostring(tab.crafts))
+  -- The margin filter: only recipes at or above the percent in the box, when the box is ticked.
+  local filter = NS.Setting("craftFilter") and true or false
+  local minPct = math.floor(tonumber(NS.Setting("craftFilterPct")) or 0)
+  tab.filterBox:SetChecked(filter)
+  if not tab.pctBox:HasFocus() then tab.pctBox:SetText(tostring(minPct)) end
+  local shown = filter and NS.FilterRecipes(tab.recipes, minPct) or tab.recipes
   if #tab.recipes == 0 then
     tab.status:SetText(UI.GREY .. "Open a profession window and the recipes appear here with cost, value, and margin." .. UI.R)
   else
     local stale = #recipes == 0 and tab.computedAt and string.format(" (from %s)", UI.AgeText(NS.Now() - tab.computedAt) or "earlier") or ""
-    tab.status:SetText(string.format("%s: %d recipes at %s prices%s. Click a recipe for its shopping list; right-click to show it in the profession window.",
-      tab.profession or "Profession", #tab.recipes, NS.MarketLabel(NS.Market()), stale))
+    local kept = filter and string.format(", %d at or above %d%%", #shown, minPct) or ""
+    tab.status:SetText(string.format("%s: %d recipes at %s prices%s%s. Click for a shopping list, right-click to open the recipe.",
+      tab.profession or "Profession", #tab.recipes, NS.MarketLabel(NS.Market()), stale, kept))
   end
+  tab.list.opts.empty = (filter and #tab.recipes > 0) and string.format("No recipe clears %d%% at current prices.", minPct) or "No recipes loaded."
   tab.list.selectedKey = tab.selected
-  tab.list:SetRows(tab.recipes)
+  tab.list:SetRows(shown)
   refreshShopping()
 end
 
+local function applyFilterPct(self)
+  local n = tonumber((self:GetText() or ""):match("%-?%d+"))
+  if n then NS.SetSetting("craftFilterPct", math.max(-100, math.min(1000, n))) end
+  self:ClearFocus()
+  refresh()
+end
+
+local ROWS = 12
+
 local function build(parent)
-  tab.status = UI.Label(parent, "", "GameFontHighlightSmall", 0, -2, 560)
+  tab.status = UI.Label(parent, "", "GameFontHighlightSmall", 0, -2, 668)
   tab.status:SetWordWrap(false)
-  UI.Label(parent, "Crafts", "GameFontNormalSmall", 574, -4, 44)
-  tab.craftsBox = UI.EditBox(parent, 44, 620, 0, function(self)
+  -- Second line: the margin filter on the left, the craft count on the right.
+  tab.filterBox = CreateFrame("CheckButton", nil, parent, "UICheckButtonTemplate")
+  tab.filterBox:SetSize(24, 24)
+  tab.filterBox:SetPoint("TOPLEFT", -4, -18)
+  local filterLabel = tab.filterBox:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+  filterLabel:SetPoint("LEFT", tab.filterBox, "RIGHT", 0, 0)
+  filterLabel:SetText("Only recipes with a margin of at least")
+  tab.filterBox:SetScript("OnClick", function(self)
+    NS.SetSetting("craftFilter", self:GetChecked() and true or false)
+    refresh()
+  end)
+  tab.filterBox:SetScript("OnEnter", function(self)
+    GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+    GameTooltip:SetText("Margin filter", 1, 1, 1)
+    GameTooltip:AddLine("Keeps only recipes whose margin, as a percent of reagent cost, reaches the number in the box. Recipes with an unpriced reagent or result are left out, since nothing says they clear it. Set it to 0 for anything that breaks even, or 10 for what clears the auction house cut.", 0.8, 0.8, 0.8, true)
+    GameTooltip:Show()
+  end)
+  tab.filterBox:SetScript("OnLeave", function() GameTooltip:Hide() end)
+  tab.pctBox = UI.EditBox(parent, 44, 240, -20, applyFilterPct)
+  tab.pctBox:SetScript("OnEditFocusLost", applyFilterPct)
+  UI.Label(parent, "%", "GameFontHighlightSmall", 288, -24, 16)
+  UI.Label(parent, "Crafts", "GameFontNormalSmall", 574, -24, 44)
+  tab.craftsBox = UI.EditBox(parent, 44, 620, -20, function(self)
     tab.crafts = math.max(1, math.floor(tonumber((self:GetText() or ""):match("%d+")) or 1))
     self:ClearFocus()
     refreshShopping()
   end)
   tab.list = UI.List(parent, {
-    x = 0, y = -26, width = 668, rows = 13, rowKey = "key",
+    x = 0, y = -46, width = 668, rows = ROWS, rowKey = "key",
     columns = {
       { key = "name", label = "Recipe", width = 180, format = function(v, r) return r.link or v end },
       { key = "cost", label = "Cost", width = 80, numeric = true, format = function(v) return NS.Gold(v) end },
@@ -385,7 +694,7 @@ local function build(parent)
     end,
   })
   tab.list:SetSort("margin", "desc")
-  local y = -26 - (18 + 13 * 18 + 16) - 6
+  local y = -46 - (18 + ROWS * 18 + 16) - 6
   tab.shopTitle = UI.Label(parent, "", "GameFontNormalSmall", 0, y, 668)
   tab.shopTitle:SetWordWrap(false)
   tab.shopText = UI.Label(parent, "", "GameFontHighlightSmall", 0, y - 18, 668)
@@ -398,6 +707,12 @@ local events = CreateFrame("Frame")
 for _, e in ipairs({ "TRADE_SKILL_SHOW", "TRADE_SKILL_LIST_UPDATE", "TRADE_SKILL_UPDATE", "CRAFT_SHOW", "CRAFT_UPDATE" }) do
   pcall(events.RegisterEvent, events, e)
 end
-events:SetScript("OnEvent", function()
+events:SetScript("OnEvent", function(_, event)
+  if event == "TRADE_SKILL_SHOW" and NS.HookCrafting then
+    -- The profession window may have loaded and filled its first rows inside this same event,
+    -- before the hooks were in place; a pass over the rows on screen catches those.
+    NS.HookCrafting()
+    if C_Timer and C_Timer.After then C_Timer.After(0, NS.RefreshRecipeDots) end
+  end
   if NS.WindowShowing and NS.WindowShowing("craft") then refresh() end
 end)
