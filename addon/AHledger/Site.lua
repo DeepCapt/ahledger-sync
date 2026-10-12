@@ -86,8 +86,7 @@ function NS.ReportNudge(db, now)
   return "This week's market report, the biggest movers on every house: " .. NS.SITE .. "/reports"
 end
 
--- World of Warcraft: Forever launches at 3 pm Pacific on 4 November 2026.
-NS.LAUNCH_AT = 1793833200
+-- NS.LAUNCH_AT (AHledger.lua): 3 pm Pacific on 4 November 2026.
 local LAUNCH_WINDOW = 14 * 86400
 
 --- Once, at the first login in the two weeks after launch. Returns the line (and marks it shown)

@@ -445,7 +445,7 @@ export function scansFromSavedVariables(src: string): SavedScan[] {
   return out;
 }
 
-const REGION_ALIASES: Record<string, Region> = { us: 'us', eu: 'eu', kr: 'kr', tw: 'tw' };
+const REGION_ALIASES: Record<string, Region> = { us: 'us', eu: 'eu', kr: 'kr', tw: 'tw', cn: 'cn' };
 
 /**
  * Build an upload from a saved scan. Returns null when the scan cannot map onto a market. Beta
@@ -459,8 +459,9 @@ export function savedScanToUpload(
   const reported = REGION_ALIASES[scan.region.toLowerCase()] ?? defaultRegion;
   const faction = scan.faction.toLowerCase();
   if (!reported || (faction !== 'alliance' && faction !== 'horde')) return null;
-  // A beta realm is a US realm whatever the client or the region setting said.
-  const region = marketRegionFor(game, reported, scan.realm);
+  // A beta realm is a US realm whatever the client or the region setting said, and so is any
+  // Forever realm scanned before its region's servers open.
+  const region = marketRegionFor(game, reported, scan.realm, scan.ts * 1000);
   return {
     v: UPLOAD_VERSION,
     addon: scan.addon ?? 'unknown',

@@ -17,7 +17,7 @@
 ]]
 
 local ADDON_NAME, NS = ...
-NS.VERSION = "0.9.3"
+NS.VERSION = "0.9.6"
 
 local MAX_SCANS_PER_MARKET = 3 -- newest scans kept per realm+faction (about 1 MB each at 50k listings)
 local MAX_SCANS_TOTAL = 12 -- hard ceiling on the SavedVariables file across every realm and faction
@@ -100,6 +100,10 @@ local DEFAULTS = {
   dealsSelling = false,
   -- Links to ahledger.com (0.9.2): window footers, the weekly report line, the launch message.
   siteLinks = true,
+  -- Profit dots in the profession window's recipe list and the Crafting tab's margin filter (0.9.5).
+  craftDots = true,
+  craftFilter = false,
+  craftFilterPct = 0,
 }
 -- Settings written while something is dragged: not worth a "last change" note each frame.
 local SILENT = { minimapAngle = true, barX = true, barY = true }
@@ -184,6 +188,15 @@ function NS.IsForeverClient()
   return minor ~= nil and minor >= 16
 end
 
+-- World of Warcraft: Forever launches at 3 pm Pacific on 4 November 2026 (23:00 UTC); the China
+-- servers open an hour earlier by the clock, 6 am China time on 5 November (22:00 UTC).
+NS.LAUNCH_AT = 1793833200
+NS.LAUNCH_AT_CN = 1793829600
+function NS.LaunchAt(region)
+  if region == "cn" then return NS.LAUNCH_AT_CN end
+  return NS.LAUNCH_AT
+end
+
 function NS.ClientInfo()
   local version, build = GetBuildInfo()
   local region = detectRegion()
@@ -192,8 +205,12 @@ function NS.ClientInfo()
   -- The Forever beta has one set of realms, hosted in the US, and every region's players are
   -- routed to them, but a European account still reports Europe. Scans and prices for a beta
   -- realm belong to the US market; up to 0.8.5 they were tagged EU, refused by the site, and the
-  -- tooltips looked for an EU price table that does not exist.
-  if NS.IsForeverClient() and realm:lower():find("^classic beta") then region = "us" end
+  -- tooltips looked for an EU price table that does not exist. The English name is one rule; a
+  -- Chinese client names the beta realms in Chinese, so the clock is the other: before a
+  -- region's servers open, every Forever realm is a beta realm (0.9.6).
+  if NS.IsForeverClient() and (realm:lower():find("^classic beta") or NS.Now() < NS.LaunchAt(region)) then
+    region = "us"
+  end
   return {
     build = string.format("%s (%s)", tostring(version), tostring(build)),
     region = region,

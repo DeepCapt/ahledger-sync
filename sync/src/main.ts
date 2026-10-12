@@ -87,7 +87,7 @@ interface RefreshResult {
   } | null;
 }
 
-const VERSION = '0.2.18';
+const VERSION = '0.2.20';
 const TABLE_REFRESH_MS = 30 * 60_000;
 const UPLOADED_KEY = 'ahl.uploaded';
 /** The release the person chose not to be reminded of; a newer one shows again. */
@@ -155,8 +155,9 @@ app.innerHTML = `
       <option value="eu">Europe (EU)</option>
       <option value="kr">Korea (KR)</option>
       <option value="tw">Taiwan (TW)</option>
+      <option value="cn">China (CN)</option>
     </select>
-    <p class="hint">The game reports its own region with each scan, so this is only a fallback for a scan that does not say: pick where you play. Forever has US and EU markets from launch; the beta runs on US servers for everyone, so beta scans always go to the US markets.</p>
+    <p class="hint">The game reports its own region with each scan, so this is only a fallback for a scan that does not say: pick where you play. Forever has US, EU and CN markets from launch; the beta runs on US servers for everyone, so beta scans always go to the US markets.</p>
     <label class="check"><input id="auto" type="checkbox" /> Upload automatically when the file changes</label>
     <div class="actions">
       <button id="save" class="primary" type="button">Save and start</button>

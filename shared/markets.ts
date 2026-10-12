@@ -26,7 +26,7 @@ export function rulesetFromRealmName(name: string): Ruleset {
 export const FACTIONS = ['alliance', 'horde', 'neutral'] as const;
 export type Faction = (typeof FACTIONS)[number];
 
-export const REGIONS = ['us', 'eu', 'kr', 'tw'] as const;
+export const REGIONS = ['us', 'eu', 'kr', 'tw', 'cn'] as const;
 export type Region = (typeof REGIONS)[number];
 
 /**
@@ -78,11 +78,24 @@ export const FOREVER_BETA_REALM = /^classic beta\b/i;
  * the US, and players from every region are routed to them, but a European account can still
  * report its home region, and the sync app's region setting fills in Europe for a European
  * player. While that holds, a beta realm belongs to the US market whatever region came with the
- * scan; uploads tagged EU were being refused although they were scans of the US realms. Launch
- * realms will have names of their own, so nothing outside the beta is moved.
+ * scan; uploads tagged EU were being refused although they were scans of the US realms.
+ *
+ * The beta realm name is English; a Chinese client names the same realms in Chinese. So the
+ * clock is the second rule: before a region's servers open (launchAtFor), every Forever scan is
+ * a beta scan, and belongs to the US market. From the region's launch instant, its realms keep
+ * their region. `observedAt` is the scan's own time in milliseconds, so a scan taken before
+ * launch and uploaded after it is still placed where it was taken.
  */
-export function marketRegionFor(gameSlug: string, region: Region, realmName: string): Region {
-  return gameSlug === 'forever' && FOREVER_BETA_REALM.test(realmName.trim()) ? 'us' : region;
+export function marketRegionFor(
+  gameSlug: string,
+  region: Region,
+  realmName: string,
+  observedAt: number = Date.now(),
+): Region {
+  if (gameSlug !== 'forever') return region;
+  if (FOREVER_BETA_REALM.test(realmName.trim())) return 'us';
+  if (observedAt < launchAtFor(region)) return 'us';
+  return region;
 }
 
 const RULESET_LABEL: Record<Ruleset, string> = {
@@ -143,33 +156,55 @@ export function labelWithRegion(label: string, region: string): string {
 export const FOREVER_LAUNCH_AT = Date.parse('2026-11-04T23:00:00Z');
 
 /**
+ * The China servers open at 6 am China Standard Time on 5 November 2026, which is 22:00 UTC on
+ * 4 November, an hour before the worldwide instant, as announced for the region. One constant,
+ * so correcting the hour is one edit.
+ */
+export const FOREVER_LAUNCH_AT_CN = Date.parse('2026-11-04T22:00:00Z');
+
+/** The instant a region's servers open: China has its own, every other region the worldwide one. */
+export function launchAtFor(region: string): number {
+  return region === 'cn' ? FOREVER_LAUNCH_AT_CN : FOREVER_LAUNCH_AT;
+}
+
+const LAUNCH_PHRASE: Record<string, string> = {
+  eu: 'midnight CET on 5 November',
+  cn: '6 am China time on 5 November',
+};
+
+/** The launch moment the way a region's players tell it: "midnight CET on 5 November". */
+export function launchPhrase(region: string): string {
+  return LAUNCH_PHRASE[region] ?? '5 November';
+}
+
+/**
  * Why a market flagged unopened has no prices, as a phrase that fits after "is" or in brackets.
- * The EU markets open with the game; the US ones that are flagged were left closed in the beta.
- * Once the game is out, either reads "not open yet", so nothing on the site goes stale.
+ * The EU and CN markets open with the game; the US ones that are flagged were left closed in the
+ * beta. Once the game is out, any reads "not open yet", so nothing on the site goes stale.
  */
 export function unopenedReason(region: string, now: number = Date.now()): string {
-  if (now >= FOREVER_LAUNCH_AT) return 'not open yet';
+  if (now >= launchAtFor(region)) return 'not open yet';
   return region === 'us'
     ? 'not open in the beta yet'
-    : 'opening at launch, midnight CET on 5 November';
+    : `opening at launch, ${launchPhrase(region)}`;
 }
 
 /** The same in two or three words, for menus and pickers: "opens at launch" or "not open yet". */
 export function unopenedShort(region: string, now: number = Date.now()): string {
-  return now < FOREVER_LAUNCH_AT && region !== 'us' ? 'opens at launch' : 'not open yet';
+  return now < launchAtFor(region) && region !== 'us' ? 'opens at launch' : 'not open yet';
 }
 
 /** "PvP Horde EU opens at launch, midnight CET on 5 November." as a whole sentence. */
 export function unopenedSentence(label: string, region: string, now: number = Date.now()): string {
-  if (now < FOREVER_LAUNCH_AT && region !== 'us')
-    return `${label} opens at launch, midnight CET on 5 November.`;
+  if (now < launchAtFor(region) && region !== 'us')
+    return `${label} opens at launch, ${launchPhrase(region)}.`;
   return `${label} is ${unopenedReason(region, now)}.`;
 }
 
 /** "Opens at launch, midnight CET on 5 November." or "Not open in the beta yet." */
 export function unopenedLine(region: string, now: number = Date.now()): string {
-  if (now < FOREVER_LAUNCH_AT && region !== 'us')
-    return 'Opens at launch, midnight CET on 5 November.';
+  if (now < launchAtFor(region) && region !== 'us')
+    return `Opens at launch, ${launchPhrase(region)}.`;
   const r = unopenedReason(region, now);
   return `${r[0]!.toUpperCase()}${r.slice(1)}.`;
 }
@@ -213,35 +248,47 @@ export const BLIZZARD_CLASSIC_AH_ID: Record<Faction, number> = {
 
 /**
  * Which markets have no prices yet and why, as one sentence: "RP Alliance US and RP Horde US are
- * not open in the beta yet, and the six EU markets open with the game at midnight CET on
- * 5 November." Empty when the list is.
+ * not open in the beta yet, the six EU markets open with the game at midnight CET on 5 November,
+ * and the six CN markets open with the game at 6 am China time on 5 November." Empty when the
+ * list is. Regions come in the order US, EU, CN, then anything else.
  */
 export function unopenedSummary(
   unopened: Array<{ label: string; slug: string }>,
   now: number = Date.now(),
 ): string {
-  const launched = now >= FOREVER_LAUNCH_AT;
   const and = (xs: string[]) =>
     xs.length <= 1 ? (xs[0] ?? '') : `${xs.slice(0, -1).join(', ')} and ${xs.at(-1)}`;
-  const eu = unopened.filter((m) => regionOfSlug(m.slug) !== 'us');
-  const us = unopened.filter((m) => regionOfSlug(m.slug) === 'us');
   const be = (xs: unknown[]) => (xs.length === 1 ? 'is' : 'are');
+  const order = ['us', 'eu', 'cn'];
+  const regions = [...new Set(unopened.map((m) => regionOfSlug(m.slug)))].sort((a, b) => {
+    const ia = order.indexOf(a);
+    const ib = order.indexOf(b);
+    return (ia < 0 ? order.length : ia) - (ib < 0 ? order.length : ib) || a.localeCompare(b);
+  });
   const parts: string[] = [];
-  if (us.length) {
-    parts.push(
-      `${and(us.map((m) => m.label))} ${be(us)} ${launched ? 'not open yet' : 'not open in the beta yet'}`,
-    );
-  }
-  if (eu.length) {
-    parts.push(
-      launched
-        ? `${and(eu.map((m) => m.label))} ${be(eu)} not open yet`
-        : eu.length === 6
-          ? 'the six EU markets open with the game at midnight CET on 5 November'
-          : `${and(eu.map((m) => m.label))} ${eu.length === 1 ? 'opens' : 'open'} with the game at midnight CET on 5 November`,
-    );
+  for (const region of regions) {
+    const ms = unopened.filter((m) => regionOfSlug(m.slug) === region);
+    const launched = now >= launchAtFor(region);
+    if (region === 'us') {
+      parts.push(
+        `${and(ms.map((m) => m.label))} ${be(ms)} ${launched ? 'not open yet' : 'not open in the beta yet'}`,
+      );
+    } else if (launched) {
+      parts.push(`${and(ms.map((m) => m.label))} ${be(ms)} not open yet`);
+    } else if (ms.length === 6) {
+      parts.push(
+        `the six ${region.toUpperCase()} markets open with the game at ${launchPhrase(region)}`,
+      );
+    } else {
+      parts.push(
+        `${and(ms.map((m) => m.label))} ${ms.length === 1 ? 'opens' : 'open'} with the game at ${launchPhrase(region)}`,
+      );
+    }
   }
   if (!parts.length) return '';
-  const out = parts.join(', and ');
+  const out =
+    parts.length <= 2
+      ? parts.join(', and ')
+      : `${parts.slice(0, -1).join(', ')}, and ${parts.at(-1)}`;
   return `${out[0]!.toUpperCase()}${out.slice(1)}.`;
 }

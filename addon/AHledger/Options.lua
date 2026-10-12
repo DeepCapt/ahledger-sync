@@ -17,6 +17,7 @@ local OPTIONS = {
   { key = "tooltipVendor", short = "Tooltip: vendor sell price", label = "Tooltip: show vendor sell price", tip = "" },
   { key = "tooltipDisenchant", short = "Tooltip: disenchant value", label = "Tooltip: show disenchant value", tip = "Expected value of the materials at current prices, for uncommon and better gear." },
   { key = "crafting", short = "Crafting margins", label = "Crafting margins in profession windows", tip = "Reagent cost, result value, and margin under the recipe." },
+  { key = "craftDots", short = "Profession window: profit dots", label = "Profit dots beside each recipe in the profession window", tip = "A dot at the right of every recipe in the list, so you can see what pays without clicking each one. Green clears 10% over reagent cost, grey is about even, yellow loses up to 30%, red more, and a grey question mark means something is unpriced. Hover a row for the exact margin. Needs Crafting margins on." },
   { key = "autoScan", short = "Scan the auction house automatically", label = "Scan the auction house automatically", tip = "One full scan when you open the auction house, at most every 15 minutes." },
   { key = "scanButton", short = "Scan button on the auction house", label = "Show the scan button on the auction house", tip = "" },
   { key = "contribute", short = "Contribute scans to ahledger.com", label = "Contribute scans to ahledger.com", tip = "Lets AHledger sync upload your scans. A scan contains listings only: no character, account, or chat data. Turn off to keep scans on this machine." },
@@ -132,6 +133,7 @@ function NS.OnSettingChanged(key)
   if key == "minimap" and NS.RefreshMinimap then NS.RefreshMinimap() end
   if (key == "observe" or key == "contribute") and NS.ObserveRefresh then NS.ObserveRefresh() end
   if key == "ahColumn" and NS.RefreshMedianColumn then NS.RefreshMedianColumn() end
+  if (key == "craftDots" or key == "crafting") and NS.RefreshRecipeDots then NS.RefreshRecipeDots() end
   if (key == "bar" or key == "barLocked" or key == "barTicker" or key == "dealsPercent" or key == "dealsMinValue") and NS.RefreshBar then NS.RefreshBar() end
   if key == "vendorFlips" and NS.RefreshVendorFlips then NS.RefreshVendorFlips() end
   if key == "questRewards" and NS.RefreshQuestRewards then NS.RefreshQuestRewards() end
@@ -142,24 +144,26 @@ end
 -- Disenchant estimate: expected material value by quality and item level, from the vanilla
 -- tables. Mirrors the disenchant table on ahledger.com, bracket for bracket, so the
 -- tooltip and the item page agree. Each yield: item id, min count, max count, chance.
+-- The dust changes tier five levels after the essence does: Strange Dust runs to item level
+-- 25 and Soul Dust starts at 26. Weapons give the essence where armor gives the dust.
 -- ---------------------------------------------------------------------------------------------
 
--- One row per five-level bracket: from, dust, essence, shard (nil below 16), upper half.
+-- One row per five-level bracket: from, dust { id, min, max, chance }, essence { id, min, max,
+-- chance }, shard { id, chance } (nil below 16).
 local BRACKETS = {
-  { 5, 10940, 10938, nil, false },
-  { 16, 10940, 10939, 10978, true },
-  { 21, 11083, 10998, 10978, false },
-  { 26, 11083, 11082, 11084, true },
-  { 31, 11137, 11134, 11138, false },
-  { 36, 11137, 11135, 11139, true },
-  { 41, 11176, 11174, 11177, false },
-  { 46, 11176, 11175, 11178, true },
-  { 51, 16204, 16202, 14343, false },
-  { 56, 16204, 16203, 14344, true },
+  { 5, { 10940, 1, 2, 0.80 }, { 10938, 1, 2, 0.20 }, nil },
+  { 16, { 10940, 2, 3, 0.75 }, { 10939, 1, 2, 0.20 }, { 10978, 0.05 } },
+  { 21, { 10940, 4, 6, 0.75 }, { 10998, 1, 2, 0.15 }, { 10978, 0.10 } },
+  { 26, { 11083, 1, 2, 0.75 }, { 11082, 1, 2, 0.20 }, { 11084, 0.05 } },
+  { 31, { 11083, 2, 5, 0.75 }, { 11134, 1, 2, 0.20 }, { 11138, 0.05 } },
+  { 36, { 11137, 1, 2, 0.75 }, { 11135, 1, 2, 0.20 }, { 11139, 0.05 } },
+  { 41, { 11137, 2, 5, 0.75 }, { 11174, 1, 2, 0.20 }, { 11177, 0.05 } },
+  { 46, { 11176, 1, 2, 0.75 }, { 11175, 1, 2, 0.20 }, { 11178, 0.05 } },
+  { 51, { 11176, 2, 5, 0.75 }, { 16202, 1, 2, 0.20 }, { 14343, 0.05 } },
+  { 56, { 16204, 1, 2, 0.75 }, { 16203, 1, 2, 0.20 }, { 14344, 0.05 } },
+  { 61, { 16204, 2, 5, 0.75 }, { 16203, 2, 3, 0.20 }, { 14344, 0.05 } },
 }
 local NEXUS = 20725
--- The large shard of each ten-level tier, for epics under 51: 5-30, 31-40, 41-50.
-local LARGE_BY_TIER = { 11084, 11084, 11139, 11178 }
 
 local function bracketFor(ilvl)
   local b = BRACKETS[1]
@@ -169,21 +173,27 @@ local function bracketFor(ilvl)
   return b
 end
 
--- quality: 2 uncommon, 3 rare, 4 epic. Returns a list of { id, min, max, chance } or nil.
-function NS.DisenchantYield(quality, ilvl)
+-- quality: 2 uncommon, 3 rare, 4 epic; weapon swaps the dust and essence odds. Returns a list
+-- of { id, min, max, chance } or nil.
+function NS.DisenchantYield(quality, ilvl, weapon)
   if not ilvl or ilvl < 5 then return nil end
   local b = bracketFor(ilvl)
   if quality == 2 then
-    local dust = b[5] and { b[2], 2, 5, 0.75 } or { b[2], 1, 2, b[4] and 0.75 or 0.80 }
-    local essence = { b[3], 1, 2, 0.20 }
-    if b[4] then return { dust, essence, { b[4], 1, 1, 0.05 } } end
+    local d, e = b[2], b[3]
+    local dust = { d[1], d[2], d[3], weapon and e[4] or d[4] }
+    local essence = { e[1], e[2], e[3], weapon and d[4] or e[4] }
+    if b[4] then return { dust, essence, { b[4][1], 1, 1, b[4][2] } } end
     return { dust, essence }
   elseif quality == 3 then
-    return { { b[4] or 10978, 1, 1, 1 } }
+    return { { b[4] and b[4][1] or 10978, 1, 1, 1 } }
   elseif quality == 4 then
-    if ilvl >= 51 then return { { NEXUS, 1, 1, 1 } } end
-    local t = math.max(0, math.min(3, math.ceil((ilvl - 20) / 10)))
-    return { { LARGE_BY_TIER[t + 1], 1, 1, 1 } }
+    if ilvl >= 61 then return { { NEXUS, 1, 2, 1 } } end
+    if ilvl >= 56 then return { { NEXUS, 1, 1, 1 } } end
+    if ilvl >= 51 then return { { 14343, 2, 4, 1 } } end
+    if ilvl >= 46 then return { { 11178, 2, 4, 1 } } end
+    if ilvl >= 40 then return { { 11177, 2, 4, 1 } } end
+    -- The vanilla tables list no epics under 40; the bracket's large shard is the nearest guess.
+    return { { ilvl >= 31 and 11139 or 11084, 1, 1, 1 } }
   end
   return nil
 end
@@ -191,10 +201,11 @@ end
 function NS.DisenchantValue(link, market)
   local _, _, quality, ilvl, _, _, _, _, _, _, _, classID = GetItemInfo(link)
   if not quality or not ilvl or ilvl < 5 then return nil end
-  if classID ~= (Enum and Enum.ItemClass and Enum.ItemClass.Armor or 4) and classID ~= (Enum and Enum.ItemClass and Enum.ItemClass.Weapon or 2) then
+  local weaponClass = Enum and Enum.ItemClass and Enum.ItemClass.Weapon or 2
+  if classID ~= (Enum and Enum.ItemClass and Enum.ItemClass.Armor or 4) and classID ~= weaponClass then
     return nil
   end
-  local yield = NS.DisenchantYield(quality, ilvl)
+  local yield = NS.DisenchantYield(quality, ilvl, classID == weaponClass)
   if not yield then return nil end
   local total, known = 0, false
   for _, y in ipairs(yield) do
