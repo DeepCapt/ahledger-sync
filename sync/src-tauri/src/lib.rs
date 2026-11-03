@@ -127,22 +127,38 @@ fn get_settings(app: AppHandle) -> Result<PublicSettings, String> {
     load_settings(&app).map(PublicSettings::from)
 }
 
-/// Unix: the file holds the upload secret, so nobody else on the machine may read it.
-fn write_private(path: &Path, contents: &str) -> Result<(), String> {
-    let tmp = path.with_extension("json.tmp");
+/// Writes `contents` to `<path>.<tmp_ext>` and renames that over `path`, so a reader never sees
+/// half a file. The temporary file is always created new: anything already at its name, such as
+/// a symlink or hard link another account planted in a folder it can write to (game folders on
+/// shared Macs often are), is removed rather than written through. `private` makes the file
+/// readable by this account only on macOS and Linux.
+fn write_replace(path: &Path, tmp_ext: &str, contents: &[u8], private: bool) -> Result<(), String> {
+    let tmp = path.with_extension(tmp_ext);
+    match fs::remove_file(&tmp) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(err(e)),
+    }
     {
         let mut opts = fs::OpenOptions::new();
-        opts.write(true).create(true).truncate(true);
+        opts.write(true).create_new(true);
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
-            opts.mode(0o600);
+            opts.mode(if private { 0o600 } else { 0o644 });
         }
+        #[cfg(not(unix))]
+        let _ = private;
         let mut f = opts.open(&tmp).map_err(err)?;
-        f.write_all(contents.as_bytes()).map_err(err)?;
+        f.write_all(contents).map_err(err)?;
         f.sync_all().map_err(err)?;
     }
     fs::rename(&tmp, path).map_err(err)
+}
+
+/// The settings file holds the upload secret, so nobody else on the machine may read it.
+fn write_private(path: &Path, contents: &str) -> Result<(), String> {
+    write_replace(path, "json.tmp", contents.as_bytes(), true)
 }
 
 /// An empty secret in the form means "keep the one already stored", but only for the same key:
@@ -254,6 +270,19 @@ fn read_scan_file(path: String) -> Result<String, String> {
     fs::read_to_string(p).map_err(err)
 }
 
+/// True when a watcher event is about AHledger.lua. The watch is on its folder and not
+/// recursive, so every event is for that folder or a file directly in it, and the file name is
+/// enough. Comparing whole paths is not: macOS reports the real path, so a game folder reached
+/// through a symlink (a game kept on an external drive, say), `/var` that is really
+/// `/private/var`, or a path typed in another case never equals the path as entered, and
+/// automatic upload silently never fired.
+fn is_scan_file_event(event_path: &Path) -> bool {
+    event_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.eq_ignore_ascii_case(SAVED_VARIABLES_FILE))
+}
+
 /// Watch the file's directory (WoW replaces the file on save, which would orphan a file watch)
 /// and tell the webview when AHledger.lua changed. Replaces any previous watch.
 #[tauri::command]
@@ -271,7 +300,7 @@ fn watch_file(app: AppHandle, state: State<'_, AppState>, path: String) -> Resul
     let wanted = target.clone();
     let mut debouncer = new_debouncer(Duration::from_secs(2), move |res: DebounceEventResult| {
         if let Ok(events) = res {
-            if events.iter().any(|e| e.path == wanted) {
+            if events.iter().any(|e| is_scan_file_event(&e.path)) {
                 let _ = handle.emit("scan-file-changed", wanted.to_string_lossy().into_owned());
             }
         }
@@ -363,7 +392,9 @@ async fn check_key(app: AppHandle) -> Result<UploadResult, String> {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Update check: the site publishes the current release at /sync/version.json
+// Update check: the site publishes the current release at /api/sync/version. It sits under /api/
+// because the site challenges every request that is not a browser outside /api/; up to 0.2.20
+// this asked for /sync/version.json, got a 429, and never heard of a release.
 // ---------------------------------------------------------------------------------------------
 
 const SITE_URL: &str = "https://ahledger.com";
@@ -419,7 +450,7 @@ async fn check_for_update() -> Result<UpdateInfo, String> {
         .build()
         .map_err(err)?;
     let text = client
-        .get(format!("{SITE_URL}/sync/version.json"))
+        .get(format!("{SITE_URL}/api/sync/version"))
         .send()
         .await
         .map_err(err)?
@@ -467,21 +498,21 @@ fn open_site_url(url: String) -> Result<(), String> {
     if !is_safe_site_url(&url) {
         return Err("only ahledger.com pages can be opened".to_string());
     }
+    // macOS: the system's own `open` by its full path, not whatever `open` comes first on PATH.
     #[cfg(target_os = "windows")]
-    {
-        std::process::Command::new("rundll32")
-            .args(["url.dll,FileProtocolHandler", &url])
-            .spawn()
-            .map_err(err)?;
-    }
+    let mut child = std::process::Command::new("rundll32")
+        .args(["url.dll,FileProtocolHandler", &url])
+        .spawn()
+        .map_err(err)?;
     #[cfg(target_os = "macos")]
-    {
-        std::process::Command::new("open").arg(&url).spawn().map_err(err)?;
-    }
+    let mut child = std::process::Command::new("/usr/bin/open").arg(&url).spawn().map_err(err)?;
     #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        std::process::Command::new("xdg-open").arg(&url).spawn().map_err(err)?;
-    }
+    let mut child = std::process::Command::new("xdg-open").arg(&url).spawn().map_err(err)?;
+    // Collect the helper's exit status once it hands the address over. On macOS and Linux a child
+    // nobody waits for stays in the process table as a zombie until sync quits, one per click.
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
     Ok(())
 }
 
@@ -853,9 +884,7 @@ async fn refresh_price_tables(app: AppHandle) -> Result<RefreshResult, String> {
     if let Some(c) = contribution.as_ref() {
         out.push_str(&render_contribution(c));
     }
-    let tmp = target.with_extension("lua.tmp");
-    fs::write(&tmp, out.as_bytes()).map_err(err)?;
-    fs::rename(&tmp, &target).map_err(err)?;
+    write_replace(&target, "lua.tmp", out.as_bytes(), false)?;
     Ok(RefreshResult {
         path: target.to_string_lossy().into_owned(),
         markets: count_markets,
@@ -1081,5 +1110,88 @@ mod tests {
         let target = data_file_for(&sv_file).unwrap();
         assert_eq!(target, addon.join("AHledger_Data.lua"));
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn scan_file_events_match_by_file_name() {
+        use super::is_scan_file_event;
+        use std::path::Path;
+        assert!(is_scan_file_event(Path::new("/private/var/x/SavedVariables/AHledger.lua")));
+        assert!(is_scan_file_event(Path::new("/Volumes/Games/WTF/Account/A/SavedVariables/ahledger.lua")));
+        assert!(!is_scan_file_event(Path::new("/x/SavedVariables/AHledger.lua.bak")));
+        assert!(!is_scan_file_event(Path::new("/x/SavedVariables/AHledger.lua.tmp")));
+        assert!(!is_scan_file_event(Path::new("/x/SavedVariables/Other.lua")));
+        assert!(!is_scan_file_event(Path::new("/x/SavedVariables")));
+    }
+
+    /// The real watcher, on a folder reached through a symlink, sees the game replace the file.
+    /// On macOS the temporary folder is itself behind one (/var is /private/var), so this is the
+    /// case that never fired there before is_scan_file_event.
+    #[cfg(unix)]
+    #[test]
+    fn watcher_sees_saves_through_a_symlinked_folder() {
+        use super::{is_scan_file_event, SAVED_VARIABLES_FILE};
+        use notify::{RecursiveMode, Watcher};
+        use notify_debouncer_mini::new_debouncer;
+        use std::{sync::mpsc, time::Duration, time::Instant};
+
+        let root = std::env::temp_dir().join(format!("ahledger-sync-watch-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let real = root.join("real");
+        let sv = real.join("WTF").join("Account").join("A").join("SavedVariables");
+        fs::create_dir_all(&sv).unwrap();
+        std::os::unix::fs::symlink(&real, root.join("linked")).unwrap();
+        let watched = root.join("linked").join("WTF").join("Account").join("A").join("SavedVariables");
+        fs::write(watched.join(SAVED_VARIABLES_FILE), "AHledgerDB = {}\n").unwrap();
+
+        let (tx, rx) = mpsc::channel();
+        let mut debouncer = new_debouncer(Duration::from_millis(300), tx).unwrap();
+        debouncer.watcher().watch(&watched, RecursiveMode::NonRecursive).unwrap();
+        std::thread::sleep(Duration::from_millis(500));
+        // The way the game saves: the old file kept as .bak, the new one written in its place.
+        fs::rename(watched.join(SAVED_VARIABLES_FILE), watched.join("AHledger.lua.bak")).unwrap();
+        fs::write(watched.join(SAVED_VARIABLES_FILE), "AHledgerDB = { n = 2 }\n").unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let mut seen = Vec::new();
+        let mut matched = false;
+        while !matched && Instant::now() < deadline {
+            if let Ok(Ok(events)) = rx.recv_timeout(Duration::from_millis(500)) {
+                for e in events {
+                    matched |= is_scan_file_event(&e.path);
+                    seen.push(e.path);
+                }
+            }
+        }
+        drop(debouncer);
+        let _ = fs::remove_dir_all(&root);
+        assert!(matched, "no event for {SAVED_VARIABLES_FILE}; saw {seen:?}");
+    }
+
+    #[test]
+    fn replaced_files_are_written_fresh_and_private() {
+        use super::write_replace;
+        let dir = std::env::temp_dir().join(format!("ahledger-sync-write-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        // A leftover temporary file from a crash is replaced, not appended to or refused.
+        fs::write(dir.join("settings.json.tmp"), "leftover").unwrap();
+        write_replace(&path, "json.tmp", b"{\"a\":1}", true).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "{\"a\":1}");
+        assert!(!dir.join("settings.json.tmp").exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+            // A symlink planted at the temporary name is removed, never written through.
+            let victim = dir.join("victim.txt");
+            fs::write(&victim, "untouched").unwrap();
+            std::os::unix::fs::symlink(&victim, dir.join("settings.json.tmp")).unwrap();
+            write_replace(&path, "json.tmp", b"{\"a\":2}", true).unwrap();
+            assert_eq!(fs::read_to_string(&victim).unwrap(), "untouched");
+            assert_eq!(fs::read_to_string(&path).unwrap(), "{\"a\":2}");
+        }
+        let _ = fs::remove_dir_all(&dir);
     }
 }

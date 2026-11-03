@@ -34,8 +34,9 @@ export function refusalAdvice(
           ? 'more than five minutes off'
           : `${minutes} minute${minutes === 1 ? '' : 's'} ${(skew ?? 0) > 0 ? 'behind' : 'ahead'}`;
       return {
-        summary: `your PC clock is ${off}`,
-        remedy: 'turn on automatic time in Windows settings, then press Upload now',
+        summary: `your computer clock is ${off}`,
+        remedy:
+          'turn on automatic time (Windows: Settings, Time and language; macOS: System Settings, General, Date and Time), then press Upload now',
         permanent: false,
       };
     }

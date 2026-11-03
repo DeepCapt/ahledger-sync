@@ -98,6 +98,24 @@ export function marketRegionFor(
   return region;
 }
 
+/**
+ * A beta scan that reaches the server once the US houses have opened. Every Forever house
+ * started empty at launch, so a scan of a beta realm, or any Forever scan taken before its
+ * region's launch, says nothing about a launch market and would only drag beta prices into the
+ * launch day's buckets. Before the US instant such a scan is still a valid beta scan.
+ */
+export function isBetaScanAfterLaunch(
+  gameSlug: string,
+  region: Region,
+  realmName: string,
+  observedAt: number,
+  now: number = Date.now(),
+): boolean {
+  if (gameSlug !== 'forever') return false;
+  if (now < launchAtFor('us')) return false;
+  return FOREVER_BETA_REALM.test(realmName.trim()) || observedAt < launchAtFor(region);
+}
+
 const RULESET_LABEL: Record<Ruleset, string> = {
   normal: 'Normal',
   pvp: 'PvP',

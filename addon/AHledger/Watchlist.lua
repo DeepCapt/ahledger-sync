@@ -6,11 +6,15 @@
   /ahl watch remove <link>   stop tracking it
   /ahl watch alert <link> <price>   chat and sound alert when the median falls to <price> or
                              below, written like 12g 50s, 1250s, or 125000 (copper)
+  /ahl watch appears <link> [price]   alert when the item is listed at all (at or below price)
   /ahl import                paste a price table from ahledger.com
 
-  A watch entry: { name, below, above, pctBelow, qtyBelow }. Alerts fire when a price table
-  loads or is imported, because prices only change with a new table; there is no polling. The
-  last alerts are kept in AHledgerDB.alertLog and shown under the list.
+  A watch entry: { name, below, above, pctBelow, qtyBelow, appears, appearsMax, appearsSeen }.
+  Alerts fire when a price table loads or is imported, because prices only change with a new
+  table; there is no polling. The last alerts are kept in AHledgerDB.alertLog and shown under
+  the list. "appears" fires once when an item that was not on the house is listed (at or below
+  appearsMax when set), and arms again once that stops holding (the house runs empty of it, or
+  its lowest buyout rises over the cap), so a piece that sells and is relisted is announced again.
 ]]
 local _, NS = ...
 local UI = NS.UI
@@ -60,6 +64,7 @@ local function alertLabel(w)
   if w.above then parts[#parts + 1] = ">" .. UI.PlainGold(w.above) end
   if w.pctBelow then parts[#parts + 1] = string.format("-%d%%", w.pctBelow) end
   if w.qtyBelow then parts[#parts + 1] = "q<" .. w.qtyBelow end
+  if w.appears then parts[#parts + 1] = w.appearsMax and ("appears<" .. UI.PlainGold(w.appearsMax)) or "appears" end
   return #parts > 0 and table.concat(parts, " ") or (UI.GREY .. "none" .. UI.R)
 end
 
@@ -104,12 +109,16 @@ local function refresh()
     tab.aboveBox:SetText(w.above and UI.PlainGold(w.above) or "")
     tab.pctBox:SetText(w.pctBelow and tostring(w.pctBelow) or "")
     tab.qtyBox:SetText(w.qtyBelow and tostring(w.qtyBelow) or "")
+    tab.appearsCheck:SetChecked(w.appears and true or false)
+    tab.appearsMaxBox:SetText(w.appearsMax and UI.PlainGold(w.appearsMax) or "")
   else
     tab.selectedText:SetText(UI.GREY .. "Select a row to edit its alerts" .. UI.R)
     tab.belowBox:SetText("")
     tab.aboveBox:SetText("")
     tab.pctBox:SetText("")
     tab.qtyBox:SetText("")
+    tab.appearsCheck:SetChecked(false)
+    tab.appearsMaxBox:SetText("")
   end
   local log = NS.Db().alertLog or {}
   local lines = {}
@@ -174,7 +183,16 @@ local function build(parent)
   setButton:SetPoint("TOPLEFT", 550, y + 1)
   local clearButton = UI.Button(parent, "Clear", 60, function() tab.clearAlertsClicked() end)
   clearButton:SetPoint("TOPLEFT", 606, y + 1)
-
+  y = y - 26
+  -- The availability alert: an item that is not on the house right now, announced when it is.
+  tab.appearsCheck = CreateFrame("CheckButton", "AHledgerWatchAppears", parent, "UICheckButtonTemplate")
+  tab.appearsCheck:SetPoint("TOPLEFT", 62, y + 6)
+  tab.appearsCheck:SetSize(24, 24)
+  tab.appearsCheck:SetScript("OnClick", function() tab.setAlertsClicked() end)
+  UI.Muted(parent, "alert when it appears on the auction house", 90, y - 4, 230)
+  UI.Muted(parent, "at or below", 326, y - 4, 70)
+  tab.appearsMaxBox = UI.EditBox(parent, 80, 400, y, function() tab.setAlertsClicked() end)
+  UI.Muted(parent, "(optional)", 486, y - 4, 60)
   y = y - 28
   tab.selectedText = UI.Label(parent, "", "GameFontHighlightSmall", 0, y, 520)
   tab.selectedText:SetWordWrap(false)
@@ -209,7 +227,12 @@ local function build(parent)
     w.above = above and above > 0 and above or nil
     w.pctBelow = pct and pct > 0 and pct < 100 and pct or nil
     w.qtyBelow = qty and qty > 0 and qty or nil
-    for _, b in ipairs({ tab.belowBox, tab.aboveBox, tab.pctBox, tab.qtyBox }) do b:ClearFocus() end
+    local appears = tab.appearsCheck:GetChecked() and true or nil
+    local appearsMax = UI.ParsePrice(tab.appearsMaxBox:GetText())
+    w.appears = appears
+    w.appearsMax = (appears and appearsMax and appearsMax > 0) and appearsMax or nil
+    if not appears then w.appearsSeen = nil end
+    for _, b in ipairs({ tab.belowBox, tab.aboveBox, tab.pctBox, tab.qtyBox, tab.appearsMaxBox }) do b:ClearFocus() end
     saveWatch()
     refresh()
   end
@@ -217,6 +240,7 @@ local function build(parent)
     if not tab.selected then NS.Print("select an item in the list first") return end
     local w = watched()[tab.selected]
     w.below, w.above, w.pctBelow, w.qtyBelow = nil, nil, nil, nil
+    w.appears, w.appearsMax, w.appearsSeen = nil, nil, nil
     saveWatch()
     refresh()
   end
@@ -254,6 +278,23 @@ function NS.WatchCommand(arg)
     else
       NS.Print("not watching that item")
     end
+  elseif sub == "appears" then
+    local id, name = itemFrom(rest)
+    if not id then NS.Print("usage: /ahl watch appears [item] 12g 50s (the price is optional)") return end
+    local price = UI.ParsePrice(rest:match("%](.*)$") or "")
+    watched()[id] = watched()[id] or { name = name }
+    local w = watched()[id]
+    if w.appears and not (price and price > 0) then
+      w.appears, w.appearsMax, w.appearsSeen = nil, nil, nil
+      NS.Print("appears alert cleared for " .. (name or id))
+    else
+      w.appears = true
+      w.appearsMax = (price and price > 0) and price or nil
+      w.appearsSeen = nil
+      NS.Print(string.format("alert when %s appears on the auction house%s", name or id, w.appearsMax and (" at or below " .. NS.Gold(w.appearsMax)) or ""))
+    end
+    saveWatch()
+    if NS.RefreshWindow then NS.RefreshWindow() end
   elseif sub == "alert" then
     local id, name = itemFrom(rest)
     local price = UI.ParsePrice(rest:match("%](.*)$") or "")
@@ -284,9 +325,26 @@ local function logAlert(itemID, text)
   while #db.alertLog > ALERT_LOG_MAX do table.remove(db.alertLog, 1) end
 end
 
--- The thresholds one watched item meets right now, as sentences. Pure.
-local function alertHits(name, w, p, label)
+-- Whether the "appears" rule holds against a price row: listed at all, and at or below the
+-- cap when there is one. The cap reads the lowest buyout, since that is what a buyer pays.
+local function appearsHolds(w, p)
+  if not w.appears or not p or (p.qty or 0) < 1 then return false end
+  if w.appearsMax then
+    local price = p.min or p.median
+    if not price or price > w.appearsMax then return false end
+  end
+  return true
+end
+NS.WatchAppearsHolds = appearsHolds
+
+-- The thresholds one watched item meets right now, as sentences. Pure. `armed` is false when
+-- the appears alert already announced the current listing; it is left out until the house is
+-- empty of the item again.
+local function alertHits(name, w, p, label, armed)
   local hits = {}
+  if appearsHolds(w, p) and armed ~= false then
+    hits[#hits + 1] = string.format("%s is on %s: %d listed, lowest %s%s", name, label, p.qty or 0, NS.Gold(p.min or p.median), w.appearsMax and (" (alert at or below " .. NS.Gold(w.appearsMax) .. ")") or "")
+  end
   if w.below and p.median and p.median <= w.below then
     hits[#hits + 1] = string.format("%s is %s on %s (alert at or below %s)", name, NS.Gold(p.median), label, NS.Gold(w.below))
   end
@@ -301,7 +359,7 @@ local function alertHits(name, w, p, label)
   end
   return hits
 end
-
+NS.WatchAlertHits = alertHits
 -- Every alert that holds against the current table, { { itemID, text } }, without printing:
 -- the ledger bar counts these.
 function NS.ActiveAlerts()
@@ -327,17 +385,26 @@ function NS.CheckAlerts()
   if NS.AlertsPaused(market) then return 0 end
   local label = NS.MarketLabel(market)
   local fired = 0
+  local changed = false
   for id, w in pairs(watched()) do
     local p = NS.Price(id, market)
     if p then
       local _, link = GetItemInfo(id)
-      for _, text in ipairs(alertHits(link or w.name or tostring(id), w, p, label)) do
+      -- The appears alert announces a listing once, then waits for the rule to stop holding
+      -- (nothing listed, or nothing at or below the cap) before it will announce the next one.
+      local armed = not w.appearsSeen
+      for _, text in ipairs(alertHits(link or w.name or tostring(id), w, p, label, armed)) do
         NS.Print(text)
         logAlert(id, text)
         fired = fired + 1
       end
+      if w.appears then
+        local seen = appearsHolds(w, p) and true or nil
+        if seen ~= w.appearsSeen then w.appearsSeen = seen; changed = true end
+      end
     end
   end
+  if changed then saveWatch() end
   if fired > 0 and NS.Setting("alertSound") and PlaySound then
     PlaySound(SOUNDKIT and SOUNDKIT.RAID_WARNING or 8959)
   end

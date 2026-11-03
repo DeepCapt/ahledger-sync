@@ -87,7 +87,11 @@ interface RefreshResult {
   } | null;
 }
 
-const VERSION = '0.2.20';
+const VERSION = '0.2.21';
+/** Where the saved-variables file sits, written the way this system writes paths. */
+const PATH_EXAMPLE = /Macintosh|Mac OS X/.test(navigator.userAgent)
+  ? '/Applications/World of Warcraft/…/WTF/Account/ACCOUNT/SavedVariables/AHledger.lua'
+  : '…\\WTF\\Account\\ACCOUNT\\SavedVariables\\AHledger.lua';
 const TABLE_REFRESH_MS = 30 * 60_000;
 const UPLOADED_KEY = 'ahl.uploaded';
 /** The release the person chose not to be reminded of; a newer one shows again. */
@@ -140,7 +144,7 @@ app.innerHTML = `
     <h2>Game client</h2>
     <label for="path">SavedVariables file</label>
     <div class="row">
-      <input id="path" type="text" placeholder="…\\WTF\\Account\\ACCOUNT\\SavedVariables\\AHledger.lua" spellcheck="false" />
+      <input id="path" type="text" placeholder="${escapeHtml(PATH_EXAMPLE)}" spellcheck="false" />
       <button id="detect" type="button">Detect</button>
       <button id="browse" type="button">Browse</button>
     </div>

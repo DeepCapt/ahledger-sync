@@ -141,6 +141,11 @@ button:disabled {
 .err {
   color: var(--red);
 }
+/* Rules that set display (.update is flex) would otherwise beat the hidden attribute, and the
+   empty update notice showed as an orange bar whenever there was no update. */
+[hidden] {
+  display: none !important;
+}
 .update {
   display: flex;
   flex-wrap: wrap;

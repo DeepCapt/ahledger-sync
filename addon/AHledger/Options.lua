@@ -10,6 +10,7 @@ local GetItemInfo = (C_Item and C_Item.GetItemInfo) or GetItemInfo
 
 local OPTIONS = {
   { key = "tooltip", short = "Prices in item tooltips", label = "Show prices in item tooltips", tip = "The AHledger line on every item tooltip." },
+  { key = "tooltipShift", short = "Tooltip: only while Shift is held", label = "Tooltip: show prices only while Shift is held", tip = "Keeps item tooltips short until you hold Shift over the item; the block appears the moment the key goes down." },
   { key = "tooltipMin", short = "Tooltip: minimum buyout", label = "Tooltip: show minimum buyout", tip = "Beside the median." },
   { key = "tooltipChange", short = "Tooltip: 7-day change", label = "Tooltip: show 7-day change", tip = "Median now against the 7-day median." },
   { key = "tooltipQuantity", short = "Tooltip: units listed", label = "Tooltip: show units listed", tip = "How many are on the auction house right now." },
@@ -248,6 +249,11 @@ function NS.OnLogin()
   if not db.paceIntro then
     db.paceIntro = true
     NS.Print("0.9.0: tooltips now show how fast an item sells on your auction house, estimated from players' scans. /ahl pace explains it.")
+  end
+  -- Once, after updating to 0.9.7: the two things players asked for first.
+  if not db.intro097 then
+    db.intro097 = true
+    NS.Print("0.9.7: the watchlist can alert when an item appears on the auction house (/ahl watch appears [item]), and item tooltips can show prices only while Shift is held (an option in /ahl).")
   end
   -- Once, in the two weeks after launch (Site.lua; off with siteLinks).
   local launch = NS.LaunchNudge and NS.LaunchNudge(db, time and time() or nil)

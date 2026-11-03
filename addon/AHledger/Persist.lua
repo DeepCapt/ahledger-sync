@@ -99,7 +99,7 @@ local function encode()
   local watch = {}
   for id, w in pairs(db.watch) do
     if type(id) == "number" then
-      watch[#watch + 1] = table.concat({ tostring(id), num(w.below), num(w.above), num(w.pctBelow), num(w.qtyBelow) }, ":")
+      watch[#watch + 1] = table.concat({ tostring(id), num(w.below), num(w.above), num(w.pctBelow), num(w.qtyBelow), w.appears and "1" or "", num(w.appearsMax) }, ":")
     end
   end
   table.sort(watch)
@@ -116,9 +116,12 @@ local function decode(str)
       if ts then last = { ts = tonumber(ts), count = tonumber(count), realm = realm, faction = faction } end
     elseif k == "w" then
       for entry in v:gmatch("[^,]+") do
-        local id, below, above, pct, qty = entry:match("^(%d+):(%d*):?(%d*):?(%d*):?(%d*)$")
+        local id, below, above, pct, qty, appears, appearsMax = entry:match("^(%d+):(%d*):?(%d*):?(%d*):?(%d*):?(%d*):?(%d*)$")
         if id then
-          watch[tonumber(id)] = { below = tonumber(below), above = tonumber(above), pctBelow = tonumber(pct), qtyBelow = tonumber(qty) }
+          watch[tonumber(id)] = {
+            below = tonumber(below), above = tonumber(above), pctBelow = tonumber(pct), qtyBelow = tonumber(qty),
+            appears = appears == "1" or nil, appearsMax = tonumber(appearsMax),
+          }
         end
       end
     elseif k and k ~= "v" then
@@ -187,7 +190,7 @@ function NS.PersistRestore()
     end
   end
   for id, w in pairs(watch) do
-    db.watch[id] = { below = w.below, above = w.above, pctBelow = w.pctBelow, qtyBelow = w.qtyBelow }
+    db.watch[id] = { below = w.below, above = w.above, pctBelow = w.pctBelow, qtyBelow = w.qtyBelow, appears = w.appears, appearsMax = w.appearsMax }
   end
   NS.PersistState = "restored"
   NS.PersistApplied = applied

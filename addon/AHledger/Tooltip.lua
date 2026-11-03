@@ -133,8 +133,16 @@ function NS.TooltipBlock(ctx)
   return out
 end
 
+-- Whether the block goes on tooltips right now: the option is on, and when the Shift-only
+-- option is on as well, Shift is held. Pure apart from the key state.
+function NS.TooltipWanted()
+  if not NS.Setting("tooltip") then return false end
+  if NS.Setting("tooltipShift") then return (IsShiftKeyDown and IsShiftKeyDown()) and true or false end
+  return true
+end
+
 local function addLines(tooltip, itemID, link)
-  if not itemID or not NS.Setting("tooltip") then return end
+  if not itemID or not NS.TooltipWanted() then return end
   -- One block per tooltip: the retail-style processor can fire twice for the same item.
   if tooltip.AHledgerItem == itemID and tooltip.AHledgerStamp == GetTime() then return end
   tooltip.AHledgerItem = itemID
@@ -165,7 +173,28 @@ local function onTooltipSetItem(tooltip)
   if itemID then addLines(tooltip, itemID, link) end
 end
 
+-- With the Shift-only option on, pressing or releasing Shift over an item redraws the tooltip
+-- so the block appears or goes at once, instead of on the next hover. The owner's own OnEnter
+-- rebuilds the tooltip the way the game does; the stamp is cleared so the block is added again.
+local function onModifierChanged(_, _, key)
+  if key ~= "LSHIFT" and key ~= "RSHIFT" then return end
+  if not NS.Setting("tooltip") or not NS.Setting("tooltipShift") then return end
+  local tip = GameTooltip
+  if not tip or tip:IsForbidden() or not tip:IsShown() or not tip.GetOwner then return end
+  local owner = tip:GetOwner()
+  local onEnter = owner and owner.GetScript and owner:GetScript("OnEnter")
+  if not onEnter then return end
+  tip.AHledgerStamp = nil
+  tip:Hide()
+  onEnter(owner)
+end
+
 function NS.InitTooltip()
+  if CreateFrame then
+    local f = CreateFrame("Frame", "AHledgerTooltipModifierFrame")
+    f:RegisterEvent("MODIFIER_STATE_CHANGED")
+    f:SetScript("OnEvent", function(...) pcall(onModifierChanged, ...) end)
+  end
   if TooltipDataProcessor and TooltipDataProcessor.AddTooltipPostCall and Enum and Enum.TooltipDataType then
     TooltipDataProcessor.AddTooltipPostCall(Enum.TooltipDataType.Item, function(tooltip, data)
       if tooltip:IsForbidden() then return end

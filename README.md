@@ -2,7 +2,7 @@
 
 The source of the two programs that run on a player's machine for [AHledger](https://ahledger.com),
 the World of Warcraft: Forever auction house site: the **AHledger addon** (in game) and
-**AHledger sync** (the optional Windows app that connects it to the site). It is published so you
+**AHledger sync** (the optional Windows and macOS app that connects it to the site). It is published so you
 can read exactly what they do, and build sync yourself if you would rather not run our installer.
 
 The website, API and database are not part of this repository.
@@ -32,22 +32,31 @@ exists.
 - **Downloads** the price tables for the Forever markets every 30 minutes and writes them to
   `Interface/AddOns/AHledger/AHledger_Data.lua`, which is how tooltips get fresh prices.
 - **Stores** its settings, including the upload key secret, in your user profile's app config
-  folder. The secret stays on the Rust side: the window never receives it back.
+  folder (on macOS `~/Library/Application Support/com.ahledger.sync`, readable by your account
+  only). The secret stays on the Rust side: the window never receives it back.
 - **Opens web pages** only on ahledger.com (the download page, and the Connect approval page),
   through a strict address check.
-- **Installs for the current user only** and needs no administrator rights. It checks
-  `https://ahledger.com/sync/version.json` at start and once a day to say when a new version is
+- **Installs for the current user only** and needs no administrator rights on Windows; on macOS
+  it is a disk image you drag to Applications. The Mac build is ad-hoc signed, not signed with an
+  Apple Developer ID, so macOS asks you to approve it once under Privacy & Security. It checks
+  `https://ahledger.com/api/sync/version` at start and once a day to say when a new version is
   out; it does not update itself.
 
 The shared parsing code the website's API uses to read the same file is in [`shared`](shared).
 
 ## Verify a download
 
-Every release on [ahledger.com/download](https://ahledger.com/download) lists the installer's
+Every release on [ahledger.com/download](https://ahledger.com/download) lists each download's
 SHA-256. On Windows:
 
 ```powershell
 Get-FileHash .\AHledger-sync-<version>-setup.exe -Algorithm SHA256
+```
+
+On macOS, in Terminal:
+
+```sh
+shasum -a 256 AHledger-sync-<version>-macos.dmg
 ```
 
 Builds are not byte-for-byte reproducible (the installer embeds build timestamps), so a hash you
@@ -56,12 +65,20 @@ build yourself will differ from ours; building it yourself is the way to run cod
 ## Build sync yourself
 
 Needs Node 20 or newer, pnpm, Rust stable, and on Windows the Visual Studio C++ build tools and
-WebView2 (already on Windows 11).
+WebView2 (already on Windows 11); on macOS the Xcode command line tools.
 
 ```sh
 cd sync
 pnpm install
-pnpm tauri build     # installer under src-tauri/target/release/bundle/nsis
+pnpm tauri build     # Windows: installer under src-tauri/target/release/bundle/nsis
+```
+
+On macOS, for one disk image that runs on Apple Silicon and Intel:
+
+```sh
+rustup target add aarch64-apple-darwin x86_64-apple-darwin
+pnpm tauri build --target universal-apple-darwin
+# disk image under src-tauri/target/universal-apple-darwin/release/bundle/dmg
 ```
 
 `pnpm tauri dev` runs it with a development window.
