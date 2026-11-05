@@ -10,7 +10,7 @@
   OnTooltipSetItem script on older clients.
 ]]
 local _, NS = ...
--- Modern clients (the Forever beta runs the Mainline UI) moved item info under C_Item.
+-- Modern clients (Forever runs the Mainline UI) moved item info under C_Item.
 local GetItemInfo = (C_Item and C_Item.GetItemInfo) or GetItemInfo
 
 local GREY = "|cff9d9d9d"

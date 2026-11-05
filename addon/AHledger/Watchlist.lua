@@ -18,7 +18,7 @@
 ]]
 local _, NS = ...
 local UI = NS.UI
--- Modern clients (the Forever beta runs the Mainline UI) moved item info under C_Item.
+-- Modern clients (Forever runs the Mainline UI) moved item info under C_Item.
 local GetItemInfo = (C_Item and C_Item.GetItemInfo) or GetItemInfo
 
 local ALERT_LOG_MAX = 30

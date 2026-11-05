@@ -2,7 +2,7 @@
  * Market vocabulary. A market is one auction house economy: game x ruleset x faction x region.
  * Brand guide section 9: markets are named "PvP Horde", "Normal Alliance", never realms or servers.
  */
-export const RULESETS = ['normal', 'pvp', 'rp', 'hardcore', 'era'] as const;
+export const RULESETS = ['normal', 'pvp', 'rp', 'hardcore', 'era', 'rppvp'] as const;
 export type Ruleset = (typeof RULESETS)[number];
 
 /**
@@ -18,8 +18,12 @@ export function rulesetFromRealmName(name: string): Ruleset {
   // European clients name the ruleset in their own language: JcJ (French, Spanish), JxJ
   // (Portuguese) for PvP; JdR (French), GdR (Italian), Rol (Spanish) for RP. German and Russian
   // clients say PvP and RP. The addon applies the same words (AHledger.lua rulesetFromRealm).
-  if (r.includes('pvp') || /(^|[^a-z])(jcj|jxj)([^a-z]|$)/.test(r)) return 'pvp';
-  if (/(^|[^a-z])(rp|jdr|gdr|rol)([^a-z]|$)/.test(r)) return 'rp';
+  const pvp = r.includes('pvp') || /(^|[^a-z])(jcj|jxj)([^a-z]|$)/.test(r);
+  const rp = /(^|[^a-z])(rp|jdr|gdr|rol)([^a-z]|$)/.test(r);
+  // RP PvP realms ("CAMWOW US2 Realm 9 RP PvP") have their own auction house, apart from PvP.
+  if (rp && pvp) return 'rppvp';
+  if (pvp) return 'pvp';
+  if (rp) return 'rp';
   return 'normal';
 }
 
@@ -70,6 +74,36 @@ export function savedFileGameMismatch(input: {
   return fileGame && fileGame !== settingGame ? { fileGame, settingGame } : null;
 }
 
+/** A SavedVariables path inside the beta client's folder, `_classic_beta_`. */
+export function isBetaClientPath(path: string | null | undefined): boolean {
+  return /[\\/]_classic_beta_[\\/]/i.test(path ?? '');
+}
+
+/** A SavedVariables path inside the live Forever client's folder, `_forever_`. */
+export function isForeverClientPath(path: string | null | undefined): boolean {
+  return /[\\/]_forever_[\\/]/i.test(path ?? '');
+}
+
+/**
+ * What to do about a sync app still watching the beta client's file once Forever is live. The
+ * game writes to `_forever_` from launch, so a path saved during the beta points at a file that
+ * never changes again: nothing uploads and nothing says why. `candidates` is the sync app's
+ * detection list, newest first. Returns the Forever file to move to when there is one, 'stale'
+ * when the player has not run the addon in the live client yet, or null when nothing is wrong.
+ */
+export function betaFolderMove(input: {
+  path: string | null | undefined;
+  candidates: readonly string[];
+  settingGame: string;
+  region: string;
+  now?: number;
+}): { to: string } | 'stale' | null {
+  if (input.settingGame !== 'forever' || !isBetaClientPath(input.path)) return null;
+  if ((input.now ?? Date.now()) < launchAtFor(input.region)) return null;
+  const to = input.candidates.find(isForeverClientPath);
+  return to ? { to } : 'stale';
+}
+
 /** The Forever beta's realms: "Classic Beta PvE", "Classic Beta PvP 2" and so on. */
 export const FOREVER_BETA_REALM = /^classic beta\b/i;
 
@@ -116,10 +150,14 @@ export function isBetaScanAfterLaunch(
   return FOREVER_BETA_REALM.test(realmName.trim()) || observedAt < launchAtFor(region);
 }
 
+/** Forever markets per region: four rulesets (Normal, PvP, RP, RP PvP), two factions. */
+export const REGION_MARKETS = 8;
+
 const RULESET_LABEL: Record<Ruleset, string> = {
   normal: 'Normal',
   pvp: 'PvP',
   rp: 'RP',
+  rppvp: 'RP PvP',
   hardcore: 'Hardcore',
   era: 'Era',
 };
@@ -139,7 +177,7 @@ export function factionLabel(f: Faction): string {
 }
 
 /**
- * "PvP Horde US". Forever runs the same six markets in more than one region, so the label names
+ * "PvP Horde US". Forever runs the same eight markets in more than one region, so the label names
  * the region; without it the US and EU houses read the same in every title, menu and email. A
  * neutral market carries the ruleset name alone.
  */
@@ -198,18 +236,23 @@ export function launchPhrase(region: string): string {
 /**
  * Why a market flagged unopened has no prices, as a phrase that fits after "is" or in brackets.
  * The EU and CN markets open with the game; the US ones that are flagged were left closed in the
- * beta. Once the game is out, any reads "not open yet", so nothing on the site goes stale.
+ * beta. Once the game is out every house is open in game, so a flagged market is one nobody has
+ * scanned yet: "waiting for its first scan", and nothing on the site goes stale.
  */
 export function unopenedReason(region: string, now: number = Date.now()): string {
-  if (now >= launchAtFor(region)) return 'not open yet';
+  if (now >= launchAtFor(region)) return 'waiting for its first scan';
   return region === 'us'
     ? 'not open in the beta yet'
     : `opening at launch, ${launchPhrase(region)}`;
 }
 
-/** The same in two or three words, for menus and pickers: "opens at launch" or "not open yet". */
+/**
+ * The same in two or three words, for menus and pickers: "opens at launch" before the region's
+ * launch, "not open yet" for a US house the beta left closed, "no scan yet" once the game is out.
+ */
 export function unopenedShort(region: string, now: number = Date.now()): string {
-  return now < launchAtFor(region) && region !== 'us' ? 'opens at launch' : 'not open yet';
+  if (now >= launchAtFor(region)) return 'no scan yet';
+  return region !== 'us' ? 'opens at launch' : 'not open yet';
 }
 
 /** "PvP Horde EU opens at launch, midnight CET on 5 November." as a whole sentence. */
@@ -219,12 +262,28 @@ export function unopenedSentence(label: string, region: string, now: number = Da
   return `${label} is ${unopenedReason(region, now)}.`;
 }
 
-/** "Opens at launch, midnight CET on 5 November." or "Not open in the beta yet." */
+/**
+ * "Opens at launch, midnight CET on 5 November." or "Not open in the beta yet." before launch,
+ * "Open in game, waiting for its first scan." after it.
+ */
 export function unopenedLine(region: string, now: number = Date.now()): string {
-  if (now < launchAtFor(region) && region !== 'us')
-    return `Opens at launch, ${launchPhrase(region)}.`;
+  if (now >= launchAtFor(region)) return 'Open in game, waiting for its first scan.';
+  if (region !== 'us') return `Opens at launch, ${launchPhrase(region)}.`;
   const r = unopenedReason(region, now);
   return `${r[0]!.toUpperCase()}${r.slice(1)}.`;
+}
+
+/**
+ * Whether a market is closed in game, which is what pickers, signup forms and saved choices ask.
+ * The unopened flag also marks a launched house nobody has scanned yet (the wording helpers above
+ * read it that way), but such a house can be watched, subscribed to and chosen like any other:
+ * only before its region's launch is a flagged market really closed.
+ */
+export function marketClosed(
+  m: { unopened?: boolean | null; slug: string },
+  now: number = Date.now(),
+): boolean {
+  return Boolean(m.unopened) && now < launchAtFor(regionOfSlug(m.slug));
 }
 
 /** The region of a market slug, `forever/pvp/horde/eu` to `eu`; `us` when the slug has none. */
@@ -266,8 +325,8 @@ export const BLIZZARD_CLASSIC_AH_ID: Record<Faction, number> = {
 
 /**
  * Which markets have no prices yet and why, as one sentence: "RP Alliance US and RP Horde US are
- * not open in the beta yet, the six EU markets open with the game at midnight CET on 5 November,
- * and the six CN markets open with the game at 6 am China time on 5 November." Empty when the
+ * not open in the beta yet, the eight EU markets open with the game at midnight CET on 5 November,
+ * and the eight CN markets open with the game at 6 am China time on 5 November." Empty when the
  * list is. Regions come in the order US, EU, CN, then anything else.
  */
 export function unopenedSummary(
@@ -287,15 +346,17 @@ export function unopenedSummary(
   for (const region of regions) {
     const ms = unopened.filter((m) => regionOfSlug(m.slug) === region);
     const launched = now >= launchAtFor(region);
-    if (region === 'us') {
+    if (launched) {
       parts.push(
-        `${and(ms.map((m) => m.label))} ${be(ms)} ${launched ? 'not open yet' : 'not open in the beta yet'}`,
+        ms.length === REGION_MARKETS
+          ? `the eight ${region.toUpperCase()} markets have no scan yet`
+          : `${and(ms.map((m) => m.label))} ${ms.length === 1 ? 'has' : 'have'} no scan yet`,
       );
-    } else if (launched) {
-      parts.push(`${and(ms.map((m) => m.label))} ${be(ms)} not open yet`);
-    } else if (ms.length === 6) {
+    } else if (region === 'us') {
+      parts.push(`${and(ms.map((m) => m.label))} ${be(ms)} not open in the beta yet`);
+    } else if (ms.length === REGION_MARKETS) {
       parts.push(
-        `the six ${region.toUpperCase()} markets open with the game at ${launchPhrase(region)}`,
+        `the eight ${region.toUpperCase()} markets open with the game at ${launchPhrase(region)}`,
       );
     } else {
       parts.push(

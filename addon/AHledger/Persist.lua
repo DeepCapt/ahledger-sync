@@ -1,10 +1,11 @@
 --[[
-  Beta workaround: the World of Warcraft: Forever beta client writes SavedVariables at logout
-  and reload but never reads them back, so every session would start from defaults. Until
-  Blizzard fixes the client, the small state that must survive (options, the market override,
-  the watchlist with its alert prices) is mirrored into addon-registered CVars, which the client
-  does persist. At load, if the saved variables came back empty, the mirror is restored. When a
-  client loads saved variables normally, the mirror is never needed: loaded data always wins.
+  Backup of the small state. The pre-launch World of Warcraft: Forever client wrote SavedVariables
+  at logout and reload but never read them back, so every session started from defaults. The
+  live client loads them, but the backup stays as a safety net: the small state that must survive
+  (options, the market override, the watchlist with its alert prices) is mirrored into
+  addon-registered CVars, which the client persists on its own. At load, if the saved variables
+  came back empty, the mirror is restored. When the client loads saved variables normally, the
+  mirror is never needed: loaded data always wins.
 
   Scans and imported price tables stay in the saved-variables file only. The file is still
   written correctly, and AHledger sync reads it from disk; price tables come from
@@ -60,7 +61,7 @@ local function writeMirror(str)
   if #str > CHUNK * CHUNKS then
     if not overflowWarned then
       overflowWarned = true
-      NS.Print(string.format("the watchlist is too long to keep across reloads on the beta client (about %d items fit); trim it or accept that it resets", math.floor((CHUNK * CHUNKS - 500) / 24)))
+      NS.Print(string.format("the watchlist is too long for the backup that survives a reload (about %d items fit); trim it, or accept that it resets if the game ever skips loading saved data", math.floor((CHUNK * CHUNKS - 500) / 24)))
     end
     return false
   end
@@ -200,9 +201,9 @@ function NS.PersistStatus()
   if NS.PersistState == "off" then return "saved data: client saved-variables only" end
   if NS.DbCreated then
     if NS.PersistState == "restored" then
-      return "saved data: the client did not load saved variables (beta bug); options and watchlist restored from the CVar mirror"
+      return "saved data: the game did not load saved variables; options and watchlist restored from the backup"
     end
-    return "saved data: the client did not load saved variables (beta bug); nothing in the CVar mirror yet, using defaults"
+    return "saved data: the game did not load saved variables; nothing in the backup yet, using defaults"
   end
-  return "saved data: loaded from disk; CVar mirror on standby"
+  return "saved data: loaded from disk; backup on standby"
 end

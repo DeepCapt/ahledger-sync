@@ -17,12 +17,12 @@
   selected recipe.
 
   Reagents with no price are listed as unknown and left out of the cost, so a margin is never
-  overstated by a missing number. Works with the modern profession window (the Forever beta)
+  overstated by a missing number. Works with the modern profession window (Forever)
   and the Classic Era TradeSkill and Craft (Enchanting) frames.
 ]]
 local _, NS = ...
 local UI = NS.UI
--- Modern clients (the Forever beta runs the Mainline UI) moved item info under C_Item.
+-- Modern clients (Forever runs the Mainline UI) moved item info under C_Item.
 local GetItemInfo = (C_Item and C_Item.GetItemInfo) or GetItemInfo
 
 local line = nil

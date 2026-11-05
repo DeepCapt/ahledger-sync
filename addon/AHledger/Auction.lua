@@ -9,7 +9,7 @@
   Results column: each browse result row gains "median · under/over %" so value is visible
   without hovering.
 
-  Both work on the modern auction house (the Forever beta) and fall back to the Classic Era
+  Both work on the modern auction house (Forever) and fall back to the Classic Era
   frames where those exist. Every hook is guarded: if a client build renames something, the
   feature switches itself off for the session instead of erroring on every click.
 ]]

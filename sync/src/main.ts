@@ -12,6 +12,9 @@ import { open } from '@tauri-apps/plugin-dialog';
 import {
   OBSERVATIONS_VERSION,
   REGIONS,
+  betaFolderMove,
+  isBetaClientPath,
+  launchAtFor,
   localeFromSavedVariables,
   observationOn,
   observationsFromSavedVariables,
@@ -87,7 +90,7 @@ interface RefreshResult {
   } | null;
 }
 
-const VERSION = '0.2.21';
+const VERSION = '0.2.22';
 /** Where the saved-variables file sits, written the way this system writes paths. */
 const PATH_EXAMPLE = /Macintosh|Mac OS X/.test(navigator.userAgent)
   ? '/Applications/World of Warcraft/…/WTF/Account/ACCOUNT/SavedVariables/AHledger.lua'
@@ -97,6 +100,8 @@ const UPLOADED_KEY = 'ahl.uploaded';
 /** The release the person chose not to be reminded of; a newer one shows again. */
 const UPDATE_DISMISSED_KEY = 'ahl.updateDismissed';
 const UPDATE_CHECK_MS = 24 * 3600_000;
+/** How often a copy still on the beta folder looks for the live client's file. */
+const FOLDER_CHECK_MS = 5 * 60_000;
 /** Hash of the last item source table sent, so an unchanged table is not sent again. */
 const OBSERVATIONS_KEY = 'ahl.observations';
 const UPLOADED_CAP = 300;
@@ -378,6 +383,12 @@ async function uploadPending(reason: string): Promise<void> {
       return;
     }
     lastMismatch = null;
+    if (onStaleBetaFolder()) {
+      setStatus(`<span class="err">${escapeHtml(STALE_BETA_MESSAGE)}</span>`);
+      if (lastMismatch !== STALE_BETA_MESSAGE) log(STALE_BETA_MESSAGE, 'err');
+      lastMismatch = STALE_BETA_MESSAGE;
+      return;
+    }
     // The item source table goes first and on its own terms. Up to 0.2.10 it was sent only
     // after a new scan in the same file write, so a reload that added quests or drops but no
     // scan (every scan already uploaded) never sent them, and a key could upload for weeks
@@ -616,8 +627,66 @@ function escapeHtml(s: string): string {
   );
 }
 
+const STALE_BETA_MESSAGE =
+  'This file is in the beta folder (_classic_beta_). Forever is live and the game now saves scans under _forever_, so this file will not change again. Install AHledger in the live game, log in once, and sync moves to the new file by itself within a few minutes (or press Detect, then Save and start). Nothing was uploaded.';
+
+/** Watching the beta client's file for Forever after launch: the game no longer writes to it. */
+function onStaleBetaFolder(): boolean {
+  return (
+    settings.game === 'forever' &&
+    isBetaClientPath(settings.savedVariablesPath) &&
+    Date.now() >= launchAtFor(settings.region)
+  );
+}
+
+/**
+ * A path saved during the beta keeps pointing at `_classic_beta_`, which the game stopped writing
+ * at launch, so a copy set up then sat idle and said nothing. When the live client has an
+ * AHledger file, move to it and start watching there. True when it moved.
+ */
+async function moveOffBetaFolder(): Promise<boolean> {
+  if (!onStaleBetaFolder()) return false;
+  let candidates: string[] = [];
+  try {
+    candidates = await invoke<string[]>('detect_saved_variables');
+  } catch {
+    return false;
+  }
+  const move = betaFolderMove({
+    path: settings.savedVariablesPath,
+    candidates,
+    settingGame: settings.game,
+    region: settings.region,
+  });
+  if (move === null || move === 'stale') return false;
+  const from = settings.savedVariablesPath;
+  // Saved from the stored settings, not the form, so a half-typed field is not saved with it.
+  try {
+    settings = await invoke<Settings>('save_settings', {
+      settings: {
+        apiUrl: settings.apiUrl,
+        keyId: settings.keyId,
+        secret: '',
+        savedVariablesPath: move.to,
+        game: settings.game,
+        region: settings.region,
+        autoUpload: settings.autoUpload,
+      } satisfies SettingsInput,
+    });
+  } catch (err) {
+    log(`could not move to ${move.to}: ${String(err)}`, 'err');
+    return false;
+  }
+  pathInput.value = settings.savedVariablesPath;
+  log(`Forever is live and saves scans under _forever_: moved from ${from} to ${move.to}`, 'ok');
+  await startWatching();
+  return true;
+}
+
 async function startWatching(): Promise<void> {
   if (!settings.savedVariablesPath) return;
+  // Moving starts watching the new file itself.
+  if (await moveOffBetaFolder()) return;
   await invoke('watch_file', { path: settings.savedVariablesPath });
   log(`watching ${settings.savedVariablesPath}`);
   await uploadPending('startup');
@@ -887,4 +956,8 @@ async function checkForUpdate(): Promise<void> {
   }
   void checkForUpdate();
   setInterval(() => void checkForUpdate(), UPDATE_CHECK_MS);
+  // A player who installs the addon in the live client after starting sync is picked up here.
+  setInterval(() => {
+    if (onStaleBetaFolder() && !busy) void moveOffBetaFolder();
+  }, FOLDER_CHECK_MS);
 })();

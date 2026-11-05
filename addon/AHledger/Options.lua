@@ -5,7 +5,7 @@
   falls back to an Interface Options page elsewhere. Every switch is a key in AHledgerDB.settings.
 ]]
 local _, NS = ...
--- Modern clients (the Forever beta runs the Mainline UI) moved item info under C_Item.
+-- Modern clients (Forever runs the Mainline UI) moved item info under C_Item.
 local GetItemInfo = (C_Item and C_Item.GetItemInfo) or GetItemInfo
 
 local OPTIONS = {
@@ -21,6 +21,8 @@ local OPTIONS = {
   { key = "craftDots", short = "Profession window: profit dots", label = "Profit dots beside each recipe in the profession window", tip = "A dot at the right of every recipe in the list, so you can see what pays without clicking each one. Green clears 10% over reagent cost, grey is about even, yellow loses up to 30%, red more, and a grey question mark means something is unpriced. Hover a row for the exact margin. Needs Crafting margins on." },
   { key = "autoScan", short = "Scan the auction house automatically", label = "Scan the auction house automatically", tip = "One full scan when you open the auction house, at most every 15 minutes." },
   { key = "scanButton", short = "Scan button on the auction house", label = "Show the scan button on the auction house", tip = "" },
+  { key = "reloadPrompt", short = "Save and upload button after a scan", label = "Offer Save and upload after a scan", tip = "The game writes a scan to disk only at logout or /reload, and AHledger sync reads the disk. After a scan the scan button becomes Save and upload, which reloads the interface when you click it. Never automatic, never in combat. /ahl upload does the same." },
+  { key = "scanNudge", short = "Say when nobody has scanned this market lately", label = "Say when this market needs a scan", tip = "One line when you open the auction house and your market has no price table or one older than six hours. Once per session." },
   { key = "contribute", short = "Contribute scans to ahledger.com", label = "Contribute scans to ahledger.com", tip = "Lets AHledger sync upload your scans. A scan contains listings only: no character, account, or chat data. Turn off to keep scans on this machine." },
   { key = "observe", short = "Contribute item sources", label = "Contribute item sources (drops, vendors, quests, fishing)", tip = "Notes which creature, chest, vendor or quest gave which item, and the zone, so item pages on ahledger.com can say where things come from. Source ids, names, zones, items and vendor prices only: nothing about your character. Needs Contribute scans on." },
   { key = "alertSound", short = "Sound for watchlist alerts", label = "Play a sound for watchlist alerts", tip = "" },
@@ -130,7 +132,7 @@ function NS.OpenOptions()
 end
 
 function NS.OnSettingChanged(key)
-  if key == "scanButton" and NS.RefreshScanButton then NS.RefreshScanButton() end
+  if (key == "scanButton" or key == "reloadPrompt") and NS.RefreshScanButton then NS.RefreshScanButton() end
   if key == "minimap" and NS.RefreshMinimap then NS.RefreshMinimap() end
   if (key == "observe" or key == "contribute") and NS.ObserveRefresh then NS.ObserveRefresh() end
   if key == "ahColumn" and NS.RefreshMedianColumn then NS.RefreshMedianColumn() end
@@ -254,6 +256,14 @@ function NS.OnLogin()
   if not db.intro097 then
     db.intro097 = true
     NS.Print("0.9.7: the watchlist can alert when an item appears on the auction house (/ahl watch appears [item]), and item tooltips can show prices only while Shift is held (an option in /ahl).")
+  end
+  -- Once, after updating to 0.9.9: RP PvP realms price on their own market from now on.
+  if not db.intro099 then
+    db.intro099 = true
+    local market = NS.Market()
+    if market:find("^forever/rppvp/") then
+      NS.Print("0.9.9: RP PvP is its own market now. Prices here come from RP PvP scans only; the first ones fill in as players scan.")
+    end
   end
   -- Once, in the two weeks after launch (Site.lua; off with siteLinks).
   local launch = NS.LaunchNudge and NS.LaunchNudge(db, time and time() or nil)

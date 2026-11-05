@@ -1,7 +1,7 @@
 <Ui xmlns="http://www.blizzard.com/wow/ui/">
   <!--
     The "Median" cell of the auction house browse list on clients that build the list with
-    Blizzard's table builder (the Forever beta and other Mainline-based clients). The builder
+    Blizzard's table builder (Forever and other Mainline-based clients). The builder
     creates cells from a named virtual template, so this one line of XML is what lets the
     addon add a real column instead of drawing over the row. The mixin lives in Auction.lua,
     which the .toc loads before this file. Nothing here depends on Blizzard_AuctionHouseUI

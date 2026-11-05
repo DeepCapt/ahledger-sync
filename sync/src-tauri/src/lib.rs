@@ -802,14 +802,26 @@ pub struct Contribution {
     pub sources: u64,
     #[serde(default)]
     pub quests: u64,
+    /// This key's place among the week's contributors, when the server works one out.
+    #[serde(default)]
+    pub rank: Option<u64>,
+    #[serde(default)]
+    pub contributors: u64,
 }
 
 /// The Lua line the addon reads for "Your scans added ...". Integers only, so nothing from
-/// the network can change what the file means.
+/// the network can change what the file means. The rank rides along when there is one, so the
+/// addon can say "you rank 3 of 12" and invite the player to put a name on it.
 fn render_contribution(c: &Contribution) -> String {
+    let rank = match c.rank {
+        Some(r) if r > 0 && c.contributors > 0 => {
+            format!(", rank = {}, contributors = {}", r, c.contributors)
+        }
+        _ => String::new(),
+    };
     format!(
-        "AHledgerData.contribution = {{ at = {}, days = {}, scans = {}, listings = {}, sources = {}, quests = {} }}\n",
-        c.at, c.days, c.scans, c.listings, c.sources, c.quests
+        "AHledgerData.contribution = {{ at = {}, days = {}, scans = {}, listings = {}, sources = {}, quests = {}{} }}\n",
+        c.at, c.days, c.scans, c.listings, c.sources, c.quests, rank
     )
 }
 
@@ -1054,11 +1066,19 @@ mod tests {
 
     #[test]
     fn contribution_renders_integers_only() {
-        let c = Contribution { at: 1790000000, days: 7, scans: 3, listings: 1240, sources: 12, quests: 36 };
+        let c = Contribution { at: 1790000000, days: 7, scans: 3, listings: 1240, sources: 12, quests: 36, rank: None, contributors: 0 };
         assert_eq!(
             render_contribution(&c),
             "AHledgerData.contribution = { at = 1790000000, days = 7, scans = 3, listings = 1240, sources = 12, quests = 36 }\n"
         );
+        // With a rank the line carries it, still integers only.
+        let ranked = Contribution { rank: Some(3), contributors: 12, ..c };
+        assert_eq!(
+            render_contribution(&ranked),
+            "AHledgerData.contribution = { at = 1790000000, days = 7, scans = 3, listings = 1240, sources = 12, quests = 36, rank = 3, contributors = 12 }\n"
+        );
+        let unranked: Contribution = serde_json::from_str(r#"{"ok":true,"scans":1,"rank":null,"contributors":4}"#).unwrap();
+        assert!(!render_contribution(&unranked).contains("rank"));
         let parsed: Contribution = serde_json::from_str(r#"{"ok":true,"keyId":"ahl_x","at":5,"days":7,"scans":1,"listings":2,"sources":0,"quests":0}"#).unwrap();
         assert_eq!(parsed.listings, 2);
         let partial: Contribution = serde_json::from_str(r#"{"ok":true}"#).unwrap();

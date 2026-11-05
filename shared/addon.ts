@@ -24,6 +24,19 @@ export const UPLOAD_SKEW_MS = 5 * 60_000;
 export const UPLOAD_NONCE_TTL_S = 15 * 60;
 /** Listings priced above this multiple of the item's 30-day median, or below 1/multiple, are dropped. */
 export const UPLOAD_OUTLIER_MULTIPLE = 20;
+/**
+ * A listing with no median to judge by (a new market, a new item) is dropped above this unit
+ * price. No item on a Classic economy has ever sold for 50,000 gold; on launch night a Chipped
+ * Bear Tooth listed at 999,999g was the whole of one market's value, and the price table the
+ * addon downloads told every tooltip so.
+ */
+export const UPLOAD_NO_HISTORY_CEILING = 50_000 * 10_000;
+/**
+ * No listing is kept above this a unit, median or no median: 250,000 gold. A joke listing that
+ * sits on the house for a day earns itself a median, and against that median it is no longer an
+ * outlier; the Chipped Bear Tooth at 999,999g passed the 20x rule on its second day.
+ */
+export const UPLOAD_UNIT_CEILING = 250_000 * 10_000;
 /** Scans observed further back than this are refused at the API (the ingest horizon is 90 days). */
 export const UPLOAD_MAX_AGE_S = 7 * 86_400;
 /** Bounds for one listing: item ids are int4 in the database; stacks never exceed a few thousand. */

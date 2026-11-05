@@ -13,11 +13,11 @@
   ReplicateItems to roughly one full scan every 15 minutes; the addon respects that, and
   the scan button says so while it applies.
 
-  Slash commands: /ahl (window) | scan | status | import | watch | bar | auto on|off | clear
+  Slash commands: /ahl (window) | scan | upload | status | import | watch | bar | auto on|off | clear
 ]]
 
 local ADDON_NAME, NS = ...
-NS.VERSION = "0.9.7"
+NS.VERSION = "0.9.10"
 
 local MAX_SCANS_PER_MARKET = 3 -- newest scans kept per realm+faction (about 1 MB each at 50k listings)
 local MAX_SCANS_TOTAL = 12 -- hard ceiling on the SavedVariables file across every realm and faction
@@ -105,6 +105,10 @@ local DEFAULTS = {
   craftDots = true,
   craftFilter = false,
   craftFilterPct = 0,
+  -- 0.9.10: the Save and upload button after a scan, and the line on opening the auction house
+  -- when nobody has scanned this market lately.
+  reloadPrompt = true,
+  scanNudge = true,
 }
 -- Settings written while something is dragged: not worth a "last change" note each frame.
 local SILENT = { minimapAngle = true, barX = true, barY = true }
@@ -167,7 +171,7 @@ function NS.SetSetting(key, value)
   if NS.PersistSave then NS.PersistSave() end
 end
 
--- Beta and PTR clients report a region id outside the retail set; fall back to the login portal.
+-- Test and PTR clients report a region id outside the retail set; fall back to the login portal.
 local function detectRegion()
   local id = GetCurrentRegion and GetCurrentRegion() or nil
   if id and REGION_NAMES[id] then return REGION_NAMES[id] end
@@ -181,8 +185,8 @@ local function detectRegion()
   return "unknown"
 end
 
--- True on the Forever client (1.16 and up; Classic Era is 1.13 to 1.15). The beta realm rule and
--- the US price fallback below only make sense there: Classic Era has realms in every region.
+-- True on the Forever client (1.16 and up; Classic Era is 1.13 to 1.15). The pre-launch realm
+-- rule and the US price fallback below only make sense there: Classic Era has realms in every region.
 function NS.IsForeverClient()
   local version = GetBuildInfo and GetBuildInfo() or nil
   local minor = tonumber(tostring(version or ""):match("^1%.(%d+)%."))
@@ -203,12 +207,12 @@ function NS.ClientInfo()
   local region = detectRegion()
   local faction = UnitFactionGroup("player") or "unknown"
   local realm = GetRealmName() or "unknown"
-  -- The Forever beta has one set of realms, hosted in the US, and every region's players are
-  -- routed to them, but a European account still reports Europe. Scans and prices for a beta
-  -- realm belong to the US market; up to 0.8.5 they were tagged EU, refused by the site, and the
-  -- tooltips looked for an EU price table that does not exist. The English name is one rule; a
-  -- Chinese client names the beta realms in Chinese, so the clock is the other: before a
-  -- region's servers open, every Forever realm is a beta realm (0.9.6).
+  -- Before launch, Forever ran one set of test realms, hosted in the US, and every region's
+  -- players were routed to them, but a European account still reported Europe. Scans and prices
+  -- for such a realm belong to the US market; up to 0.8.5 they were tagged EU, refused by the
+  -- site, and the tooltips looked for an EU price table that does not exist. The English name is
+  -- one rule; a Chinese client names those realms in Chinese, so the clock is the other: before
+  -- a region's servers open, every Forever realm is a pre-launch realm (0.9.6).
   if NS.IsForeverClient() and (realm:lower():find("^classic beta") or NS.Now() < NS.LaunchAt(region)) then
     region = "us"
   end
@@ -221,15 +225,20 @@ function NS.ClientInfo()
 end
 local clientInfo = NS.ClientInfo
 
--- Forever is realmless: the realm name carries the ruleset ("... PvP", "... RP", "... Hardcore").
--- European clients use their own words: JcJ (French, Spanish) and JxJ (Portuguese) for PvP, JdR
--- (French), GdR (Italian) and Rol (Spanish) for RP. The site reads realm names the same way.
+-- Forever is realmless: the realm name carries the ruleset ("... PvE", "... PvP", "... RP",
+-- "... RP PvP", "... Hardcore"). Each ruleset is its own megaserver with its own auction house,
+-- RP PvP included (0.9.9). European clients use their own words: JcJ (French, Spanish) and JxJ
+-- (Portuguese) for PvP, JdR (French), GdR (Italian) and Rol (Spanish) for RP. The site reads
+-- realm names the same way.
 local function word(r, w) return r:find("%f[%a]" .. w .. "%f[%A]") ~= nil end
 local function rulesetFromRealm(realm)
   local r = (realm or ""):lower()
   if r:find("hardcore", 1, true) then return "hardcore" end
-  if r:find("pvp", 1, true) or word(r, "jcj") or word(r, "jxj") then return "pvp" end
-  if word(r, "rp") or word(r, "jdr") or word(r, "gdr") or word(r, "rol") then return "rp" end
+  local pvp = r:find("pvp", 1, true) or word(r, "jcj") or word(r, "jxj")
+  local rp = word(r, "rp") or word(r, "jdr") or word(r, "gdr") or word(r, "rol")
+  if rp and pvp then return "rppvp" end
+  if pvp then return "pvp" end
+  if rp then return "rp" end
   return "normal"
 end
 NS.RulesetFromRealm = rulesetFromRealm
@@ -243,12 +252,12 @@ function NS.Market()
   local region = info.region ~= "unknown" and info.region or "us"
   -- Each region is its own economy (Forever opens its EU servers with the US ones), so an EU
   -- character prices on the EU market even before it has prices; showing US prices instead would
-  -- be wrong numbers presented as right. Beta realms are US realms (ClientInfo).
+  -- be wrong numbers presented as right. Pre-launch realms are US realms (ClientInfo).
   return string.format("forever/%s/%s/%s", rulesetFromRealm(info.realm), (info.faction or "unknown"):lower(), region)
 end
 
 -- "forever/pvp/horde/us" -> "PvP Horde (US)", the way the site names markets.
-local RULESET_LABEL = { normal = "Normal", pvp = "PvP", rp = "RP", hardcore = "Hardcore" }
+local RULESET_LABEL = { normal = "Normal", pvp = "PvP", rp = "RP", rppvp = "RP PvP", hardcore = "Hardcore" }
 function NS.MarketLabel(market)
   market = market or NS.Market()
   local _, ruleset, faction, region = market:match("^([^/]+)/([^/]+)/([^/]+)/([^/]+)$")
@@ -331,8 +340,8 @@ end
 -- or /reload, so it is not on disk yet and sync cannot have uploaded it.
 NS.SessionStart = now()
 
--- The newest scan for this realm and faction. On the beta client the scans list is empty after
--- every reload (the client does not read SavedVariables back), so the time and size of the last
+-- The newest scan for this realm and faction. Should the client start a session without its
+-- saved variables (the pre-launch client did, after every reload), the time and size of the last
 -- scan are mirrored into CVars by Persist.lua and read from there, which keeps the throttle
 -- countdown honest across a reload rather than inviting a request the server will refuse.
 local function lastScan()
@@ -456,12 +465,59 @@ function NS.ScanStatusLines(tt, state)
   end
 end
 
+-- ---------------------------------------------------------------------------------------------
+-- Save and upload (0.9.10)
+--
+-- The client writes SavedVariables only at logout and /reload, so a scan made this session sits
+-- unseen by AHledger sync until one of those happens. ReloadUI() is that write, one click away.
+-- It is never called on its own: a player presses the button or types /ahl upload, and never in
+-- combat, where the game would refuse it anyway.
+-- ---------------------------------------------------------------------------------------------
+
+-- Reloads the interface so the saved file is written. Returns true when it did, false with a
+-- chat line when it could not.
+function NS.UploadNow()
+  if InCombatLockdown and InCombatLockdown() then
+    print_("cannot reload in combat; type /reload (or press Save and upload) once the fight is over")
+    return false
+  end
+  if not ReloadUI then
+    print_("this client has no ReloadUI; type /reload so AHledger sync can send the scan")
+    return false
+  end
+  print_("saving the scan to disk so AHledger sync can send it...")
+  ReloadUI()
+  return true
+end
+
+-- True while the Save and upload button has a job: a scan from this session is not on disk,
+-- contribution is on, and the player has not turned the button off.
+function NS.UploadButtonWanted(state)
+  state = state or NS.ScanState()
+  if not NS.Setting("reloadPrompt") then return false end
+  if state.phase ~= "blocked" then return false end
+  return state.unsent == true and state.contribute == true
+end
+
 local buttons = {}
+local uploadButton = nil
 local startTicker -- defined below; the clock runs whenever a button shows something that moves
 
 local function applyButton(b, state)
   b:SetText(NS.ScanButtonText(state))
   if state.phase == "idle" then b:Enable() else b:Disable() end
+end
+
+-- The Save and upload button stands where the scan button does, while that one would only say
+-- "/reload to send": one slot, no overlap with the house's own search bar.
+local function placeUploadButton(state)
+  if not uploadButton or not scanButton then return end
+  if NS.UploadButtonWanted(state) and NS.Setting("scanButton") then
+    scanButton:Hide()
+    uploadButton:Show()
+  else
+    uploadButton:Hide()
+  end
 end
 
 local function setButtonState()
@@ -474,6 +530,7 @@ local function setButtonState()
       applyButton(b, state)
     end
   end
+  placeUploadButton(state)
   if NS.RefreshScanFooter then NS.RefreshScanFooter() end
   if state.phase ~= "idle" then startTicker() end
 end
@@ -596,9 +653,12 @@ finishScan = function()
   refusedAt = nil
   endScan()
   if NS.PersistSave then NS.PersistSave(true) end
-  local tail = db.settings.contribute
-    and " Type /reload so AHledger sync can upload it."
-    or " Contribution is off; it stays on this machine."
+  local tail = " Contribution is off; it stays on this machine."
+  if db.settings.contribute then
+    tail = db.settings.reloadPrompt
+      and " Type /reload (or press Save and upload) so sync can send it."
+      or " Type /reload so AHledger sync can upload it."
+  end
   print_(string.format("scan saved: %s listings on %s (%s)%s.%s",
     comma(n), info.realm, info.faction, skipped > 0 and string.format(", %d without item ids skipped", skipped) or "", tail))
   -- What the scan found, right here in chat, so the scan button pays off without opening anything.
@@ -706,13 +766,88 @@ local function ensureButton()
   if level then scanButton:SetFrameLevel(level + 5) end
   scanButton:SetScript("OnClick", function() startScan(true) end)
   NS.RegisterScanButton(scanButton)
+  -- Save and upload: the same slot, shown in place of the scan button while a scan from this
+  -- session waits for a reload (UI.lua loads after this file, so its helper is looked up here).
+  if NS.UI and NS.UI.Button then
+    uploadButton = NS.UI.Button(home, "Save and upload", 120, NS.UploadNow)
+  else
+    uploadButton = CreateFrame("Button", nil, home, "UIPanelButtonTemplate")
+    uploadButton:SetSize(120, 22)
+    uploadButton:SetText("Save and upload")
+    uploadButton:SetScript("OnClick", NS.UploadNow)
+  end
+  _G.AHledgerUploadButton = uploadButton
+  uploadButton:SetAllPoints(scanButton)
+  if level then uploadButton:SetFrameLevel(level + 5) end
+  uploadButton:SetScript("OnEnter", function(self)
+    GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+    GameTooltip:AddLine("Save and upload", 1, 1, 1)
+    GameTooltip:AddLine("Reloads the interface, which writes the scan to disk so AHledger sync can send it to ahledger.com. The same as typing /reload.", 1, 1, 1, true)
+    GameTooltip:Show()
+  end)
+  uploadButton:SetScript("OnLeave", function() GameTooltip:Hide() end)
+  uploadButton:Hide()
   setButtonState()
+end
+
+-- ---------------------------------------------------------------------------------------------
+-- Nudges (0.9.10): one line when the auction house opens and nobody has scanned this market
+-- lately, and one line, ever, inviting a contributor to put a name on their scans.
+-- ---------------------------------------------------------------------------------------------
+
+local STALE_TABLE = 6 * 3600 -- seconds; past this the market counts as unscanned
+local nudgedMarkets = {} -- markets already nudged this session
+
+-- The line for a market whose prices are missing or old, or nil. Pure, for the harness: `age`
+-- is the table's age in seconds, nil when there is no live table (none, or the shipped snapshot).
+function NS.ScanNudgeText(market, age)
+  local label = NS.MarketLabel(market)
+  if age == nil then
+    return string.format("%s has no scan since launch yet. Scan now and your prices are the ones everyone sees.", label)
+  end
+  if age < STALE_TABLE then return nil end
+  return string.format("Nobody has scanned %s in %d hours. Scan now and your prices are the ones everyone sees.", label, math.floor(age / 3600))
+end
+
+-- Once per session per market, when the house opens. Returns the line printed, or nil.
+function NS.ScanNudge(market)
+  market = market or NS.Market()
+  if not NS.Setting("scanNudge") or nudgedMarkets[market] then return nil end
+  if not NS.TableFor then return nil end -- Prices.lua not loaded: nothing to judge
+  local t = NS.TableFor(market)
+  local age = nil
+  if t and not (NS.TableIsSeed and NS.TableIsSeed(market)) then
+    age = NS.TableAge and NS.TableAge(market) or nil
+    if age == nil then return nil end -- a table with no date is not one to call stale
+  end
+  local line = NS.ScanNudgeText(market, age)
+  if not line then return nil end
+  nudgedMarkets[market] = true
+  print_(line)
+  return line
+end
+
+-- The invitation to the contributor leaderboard, once the first contribution with a scan in it
+-- is seen (sync writes the numbers into AHledger_Data.lua). Marks db.optInNudge and returns the
+-- line, or nil. Pure apart from the flag, for the harness.
+function NS.OptInNudge(db, c)
+  if db.optInNudge then return nil end
+  if type(c) ~= "table" or (tonumber(c.scans) or 0) < 1 then return nil end
+  db.optInNudge = true
+  local lead = ""
+  local rank, total = tonumber(c.rank), tonumber(c.contributors)
+  if rank and rank > 0 and total and total > 0 then
+    lead = string.format("You rank %d of %d contributors this week. ", rank, total)
+  end
+  return lead .. "Your scans are on ahledger.com. Put a name on them: choose one under Contributor leaderboard on your account page (ahledger.com/account)."
 end
 
 -- Events the scanner answers; the frame's handler below routes them here.
 function NS.ScanEvent(event)
   if event == "AUCTION_HOUSE_SHOW" then
     ensureButton()
+    -- Why the scan matters, before the auto scan runs: the market is unscanned or going stale.
+    pcall(NS.ScanNudge)
     if canAutoScan() then startScan(false) end
     startTicker()
   elseif event == "AUCTION_HOUSE_CLOSED" then
@@ -852,6 +987,8 @@ SlashCmdList["AHLEDGER"] = function(msg)
   local db = ensureDb()
   if cmd == "scan" then
     startScan(true)
+  elseif cmd == "upload" then
+    NS.UploadNow()
   elseif cmd == "status" then
     NS.Status()
   elseif cmd == "import" then
@@ -897,7 +1034,7 @@ SlashCmdList["AHLEDGER"] = function(msg)
   elseif cmd == "pace" then
     for _, line in ipairs(NS.PaceHelp and NS.PaceHelp() or {}) do print_(line) end
   else
-    print_("commands: /ahl (window) | deals | bags | craft | options | scan | status | pace | link [item] | import | watch add|remove|alert | bar [lock|unlock|reset] | set <option> on|off | market <key|detect> | auto on|off | clear")
+    print_("commands: /ahl (window) | deals | bags | craft | options | scan | upload | status | pace | link [item] | import | watch add|remove|alert | bar [lock|unlock|reset] | set <option> on|off | market <key|detect> | auto on|off | clear")
   end
 end
 
@@ -932,8 +1069,12 @@ AHledger:SetScript("OnEvent", function(_, event, arg1)
       print_(string.format("v%s loaded. No price table for %s yet: run AHledger sync, or paste one with /ahl import. /ahl for options.", NS.VERSION, NS.MarketLabel(market)))
     end
     if NS.DbCreated and NS.PersistState == "restored" then
-      print_("beta workaround: the client did not load saved variables, so your options and watchlist were restored from the CVar mirror.")
+      print_("your saved options and watchlist were not loaded by the game this time; AHledger restored them from its backup.")
     end
+    -- Once ever: the first time sync reports a scan of this player's on the site (Bar.lua reads
+    -- the numbers from the data file).
+    local invite = NS.OptInNudge(ensureDb(), NS.Contribution and NS.Contribution() or nil)
+    if invite then print_(invite) end
     -- Safety net: mirror every minute in case a change slipped past the explicit saves.
     if NS.PersistSave and C_Timer and C_Timer.After then
       local function tick()

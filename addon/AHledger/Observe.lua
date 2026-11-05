@@ -12,7 +12,7 @@
 
   Loot windows also count how often a source was opened (item 0 rows), which is what turns
   "seen 12 times" into a drop rate once enough people have looted it. Each line carries a
-  session id: the beta client starts every session with an empty table, and the server sums
+  session id: the pre-launch client started every session with an empty table, and the server sums
   sessions rather than keeping the larger count.
 ]]
 local _, NS = ...
