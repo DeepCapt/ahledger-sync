@@ -735,6 +735,12 @@ async fn upload_ledger(app: AppHandle, body: String) -> Result<UploadResult, Str
     signed_post(&app, "/v1/upload/ledger", body, true).await
 }
 
+/// Gzip, sign, and POST the players the addon saw to `/v1/upload/sightings` (0.2.25).
+#[tauri::command]
+async fn upload_sightings(app: AppHandle, body: String) -> Result<UploadResult, String> {
+    signed_post(&app, "/v1/upload/sightings", body, true).await
+}
+
 // ---------------------------------------------------------------------------------------------
 // Price tables: downloaded from the API and written into the addon's data file
 // ---------------------------------------------------------------------------------------------
@@ -844,6 +850,10 @@ struct WatchAnswer {
     saved_at: u64,
     #[serde(default)]
     items: Vec<WatchItem>,
+    /// Ids the addon sent that the account did not keep: not removed on the site, so the addon
+    /// keeps them too.
+    #[serde(default)]
+    dropped: Vec<u64>,
 }
 #[derive(Deserialize)]
 struct WatchItem {
@@ -856,6 +866,8 @@ struct WatchItem {
 pub struct WatchSummary {
     pub linked: bool,
     pub at: u64,
+    #[serde(rename = "savedAt")]
+    pub saved_at: u64,
     pub items: usize,
 }
 
@@ -872,11 +884,21 @@ fn render_watch(a: &WatchAnswer) -> String {
     ids.sort_unstable();
     ids.dedup();
     let body: Vec<String> = ids.iter().map(|i| format!("[{}] = 1", i)).collect();
+    let mut dropped: Vec<u64> = a
+        .dropped
+        .iter()
+        .copied()
+        .filter(|&i| i > 0 && i < 100_000_000)
+        .collect();
+    dropped.sort_unstable();
+    dropped.dedup();
+    let kept_out: Vec<String> = dropped.iter().map(|i| format!("[{}] = 1", i)).collect();
     format!(
-        "AHledgerData.watch = {{ at = {}, savedAt = {}, items = {{ {} }} }}\n",
+        "AHledgerData.watch = {{ at = {}, savedAt = {}, items = {{ {} }}, dropped = {{ {} }} }}\n",
         a.at,
         a.saved_at,
-        body.join(", ")
+        body.join(", "),
+        kept_out.join(", ")
     )
 }
 
@@ -984,6 +1006,7 @@ async fn refresh_price_tables(
         watch: answer.as_ref().map(|a| WatchSummary {
             linked: a.linked,
             at: a.at,
+            saved_at: a.saved_at,
             items: a.items.len(),
         }),
     })
@@ -1053,6 +1076,7 @@ pub fn run() {
             check_key,
             upload_observations,
             upload_ledger,
+            upload_sightings,
             check_for_update,
             open_site_url,
             price_table_path,
@@ -1143,13 +1167,17 @@ mod tests {
                 WatchItem { id: 0 },
                 WatchItem { id: 999_999_999 },
             ],
+            dropped: vec![7073, 7073, 0],
         };
         assert_eq!(
             render_watch(&a),
-            "AHledgerData.watch = { at = 1790000100, savedAt = 1790000000, items = { [2589] = 1, [12784] = 1 } }\n"
+            "AHledgerData.watch = { at = 1790000100, savedAt = 1790000000, items = { [2589] = 1, [12784] = 1 }, dropped = { [7073] = 1 } }\n"
         );
-        let empty = WatchAnswer { linked: true, at: 5, saved_at: 0, items: vec![] };
-        assert_eq!(render_watch(&empty), "AHledgerData.watch = { at = 5, savedAt = 0, items = {  } }\n");
+        let empty = WatchAnswer { linked: true, at: 5, saved_at: 0, items: vec![], dropped: vec![] };
+        assert_eq!(
+            render_watch(&empty),
+            "AHledgerData.watch = { at = 5, savedAt = 0, items = {  }, dropped = {  } }\n"
+        );
     }
 
     #[test]

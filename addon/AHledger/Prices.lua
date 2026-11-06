@@ -124,6 +124,7 @@ function NS.ImportTable(text)
   local _, body = text:gsub("^%s+", ""):match("^([^\n]+)\n?(.*)$")
   db.tables[market] = { updated = updated or NS.Now(), count = n, text = body }
   cache[market] = nil
+  if NS.CrossMarketReset then NS.CrossMarketReset() end
   return market, n
 end
 
@@ -291,8 +292,20 @@ function NS.OtherFaction(market)
   return string.format("%s/%s/%s/%s", game, ruleset, other, region)
 end
 
+local regionCache = {} -- market -> its region's other markets
+local crossCache = {} -- market .. ":" .. item -> CrossMarket's answer
+
+-- Forgotten whenever a table changes (an import, a login): the lists and answers below are
+-- cheap to build once and costly to build per tooltip.
+function NS.CrossMarketReset()
+  regionCache = {}
+  crossCache = {}
+end
+
 -- Every market with a table in the same game and region as `market`, other than itself.
 function NS.RegionMarkets(market)
+  local hit = regionCache[market]
+  if hit then return hit end
   local game, _, _, region = (market or ""):match("^([^/]+)/([^/]+)/([^/]+)/([^/]+)$")
   local out = {}
   if not game then return out end
@@ -301,6 +314,7 @@ function NS.RegionMarkets(market)
       out[#out + 1] = m
     end
   end
+  regionCache[market] = out
   return out
 end
 
@@ -310,6 +324,9 @@ end
 -- skipped, since a snapshot price is not one to travel for.
 function NS.CrossMarket(itemID, market)
   market = market or NS.Market()
+  local key = market .. ":" .. tostring(itemID)
+  local hit = crossCache[key]
+  if hit then return hit end
   local out = {}
   local other = NS.OtherFaction(market)
   if other then
@@ -325,5 +342,6 @@ function NS.CrossMarket(itemID, market)
     end
   end
   if best and (not here or not here.median or best.row.median < here.median) then out.cheapest = best end
+  crossCache[key] = out
   return out
 end

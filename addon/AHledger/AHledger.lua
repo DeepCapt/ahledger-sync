@@ -17,7 +17,7 @@
 ]]
 
 local ADDON_NAME, NS = ...
-NS.VERSION = "0.11.0"
+NS.VERSION = "0.12.1"
 
 local MAX_SCANS_PER_MARKET = 3 -- newest scans kept per realm+faction (about 1 MB each at 50k listings)
 local MAX_SCANS_TOTAL = 12 -- hard ceiling on the SavedVariables file across every realm and faction
@@ -125,6 +125,8 @@ local DEFAULTS = {
   ledger = true,
   undercutCheck = true,
   ledgerDays = 7,
+  -- 0.12.0: the players you see, by name, for the PvP ladder on ahledger.com.
+  sightings = true,
 }
 -- Settings written while something is dragged: not worth a "last change" note each frame.
 local SILENT = { minimapAngle = true, barX = true, barY = true }
@@ -1134,6 +1136,7 @@ AHledger:SetScript("OnEvent", function(_, event, arg1)
     local invite = NS.OptInNudge(ensureDb(), NS.Contribution and NS.Contribution() or nil)
     if invite then print_(invite) end
     -- The account watchlist sync wrote into the data file, and what moved since the last table.
+    if NS.CrossMarketReset then NS.CrossMarketReset() end
     if NS.WatchSyncFromData then pcall(NS.WatchSyncFromData) end
     if NS.MarketPulse then pcall(NS.MarketPulse) end
     -- Safety net: mirror every minute in case a change slipped past the explicit saves.

@@ -35,8 +35,11 @@ end
 function NS.LedgerAdd(e, now)
   if type(e) ~= "table" or not KINDS[e.k] then return nil end
   now = now or NS.Now()
+  local db = NS.Db()
   local list = entries()
   e.t = e.t or now
+  db.ledgerSeq = (tonumber(db.ledgerSeq) or 0) + 1
+  e.s = db.ledgerSeq
   e.q = math.max(1, math.floor(tonumber(e.q) or 1))
   e.p = math.max(0, math.floor(tonumber(e.p) or 0))
   list[#list + 1] = e

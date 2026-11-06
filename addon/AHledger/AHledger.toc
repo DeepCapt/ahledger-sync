@@ -2,7 +2,7 @@
 ## Title: AHledger
 ## Notes: Auction house prices in your tooltips and crafting windows, a ledger bar with your bags, session gold, alerts and deals, the best quest reward marked, vendor flips, a watchlist with alerts, and a scanner that contributes to a shared price database for World of Warcraft: Forever. Free, no automation, nothing paywalled.
 ## Author: AHledger
-## Version: 0.11.0
+## Version: 0.12.1
 ## SavedVariables: AHledgerDB
 ## X-Website: https://ahledger.com
 ## X-License: All Rights Reserved
@@ -30,6 +30,7 @@ Bar.lua
 QuestReward.lua
 Mail.lua
 Ledger.lua
+Sightings.lua
 Vendor.lua
 API.lua
 AHledger.xml

@@ -228,7 +228,21 @@ export type LuaValue = null | boolean | number | string | LuaValue[] | { [k: str
  * assignments, table constructors with `[key] =`, `name =`, and positional entries, strings,
  * numbers, booleans, nil, and `--` comments. Tables whose keys are exactly 1..n become arrays.
  */
+/**
+ * One file text is read by several extractors in a row (scans, item sources, quests, the ledger,
+ * the watchlist, the sightings), each of which used to tokenise the whole file again. The last
+ * parse is kept while the same text is being handed around; callers only read the result.
+ */
+let lastParse: { src: string; root: Record<string, LuaValue> } | null = null;
+
 export function parseLuaSavedVariables(src: string): Record<string, LuaValue> {
+  if (lastParse && lastParse.src === src) return lastParse.root;
+  const root = parseLuaSavedVariablesUncached(src);
+  lastParse = { src, root };
+  return root;
+}
+
+function parseLuaSavedVariablesUncached(src: string): Record<string, LuaValue> {
   if (src.length > LUA_MAX_BYTES) {
     throw new Error(`lua parse error: input exceeds ${LUA_MAX_BYTES} bytes`);
   }
@@ -439,8 +453,11 @@ export interface AddonLedgerEntry {
   p: number;
   cut?: number;
   dep?: number;
+  /** The addon's running sequence number (0.12.1), so two entries alike in the same second stay two. */
+  s?: number;
 }
 
+export const LEDGER_KINDS = ['post', 'sale', 'buy', 'expire', 'cancel'] as const;
 const LEDGER_KIND = new Set(['post', 'sale', 'buy', 'expire', 'cancel']);
 export const LEDGER_MAX_ENTRIES = 3000;
 
@@ -474,10 +491,49 @@ export function ledgerFromSavedVariables(src: string): AddonLedgerEntry[] {
     if (id !== undefined && id > 0) entry.id = Math.floor(id);
     const cut = num(e['cut']);
     const dep = num(e['dep']);
+    const seq = num(e['s']);
     if (cut !== undefined && cut > 0) entry.cut = Math.floor(cut);
     if (dep !== undefined && dep > 0) entry.dep = Math.floor(dep);
+    if (seq !== undefined && seq > 0) entry.s = Math.floor(seq);
     out.push(entry);
     if (out.length >= LEDGER_MAX_ENTRIES) break;
+  }
+  return out;
+}
+
+/** One player the addon saw (AHledgerDB.sightings, addon 0.12.0), keyed by the name shown. */
+export interface AddonSighting {
+  n: string;
+  r?: 'normal' | 'pvp' | 'rp' | 'rppvp' | 'hardcore';
+  f?: 'Alliance' | 'Horde';
+  c?: string;
+  l?: number;
+}
+
+export const SIGHTINGS_MAX = 5000;
+const SIGHTING_RULESET = new Set(['normal', 'pvp', 'rp', 'rppvp', 'hardcore']);
+
+/** The addon's sightings table from a SavedVariables file, cleaned; empty when absent. */
+export function sightingsFromSavedVariables(src: string): AddonSighting[] {
+  const root = parseLuaSavedVariables(src);
+  const db = root['AHledgerDB'];
+  if (!db || typeof db !== 'object' || Array.isArray(db)) return [];
+  const table = (db as Record<string, LuaValue>)['sightings'];
+  if (!table || typeof table !== 'object' || Array.isArray(table)) return [];
+  const out: AddonSighting[] = [];
+  for (const [name, raw] of Object.entries(table as Record<string, LuaValue>)) {
+    const n = name.trim();
+    if (n.length < 2 || n.length > 90 || !raw || typeof raw !== 'object' || Array.isArray(raw))
+      continue;
+    const e = raw as Record<string, LuaValue>;
+    const s: AddonSighting = { n: n.slice(0, 90) };
+    if (typeof e['r'] === 'string' && SIGHTING_RULESET.has(e['r']))
+      s.r = e['r'] as AddonSighting['r'];
+    if (e['f'] === 'Alliance' || e['f'] === 'Horde') s.f = e['f'];
+    if (typeof e['c'] === 'string' && e['c'].length <= 20) s.c = e['c'];
+    if (typeof e['l'] === 'number' && e['l'] >= 1 && e['l'] <= 80) s.l = Math.floor(e['l']);
+    out.push(s);
+    if (out.length >= SIGHTINGS_MAX) break;
   }
   return out;
 }

@@ -44,6 +44,7 @@ local OPTIONS = {
   { key = "autoUpload", short = "Reload after a scan when leaving the auction house", label = "Reload the interface when you leave the auction house after a scan", tip = "Off by default. On: when the auction house closes with a scan from this session not yet saved to disk, the interface reloads a moment later, which writes the scan so AHledger sync can send it. Never in combat. The Save and upload button does the same by hand." },
   { key = "ledger", short = "Ledger: posts, sales and purchases", label = "Keep a ledger of what you post, sell and buy", tip = "Noted as you post and as you take the auction house mail: the item, the quantity, the money, the house cut. The Ledger tab sums it per item for the last N days. Nothing is taken or posted by the addon." },
   { key = "undercutCheck", short = "Auction house: say when your auctions are undercut", label = "Auction house: say when your auctions are undercut", tip = "When your auctions list loads, each listing is set against the lowest price for that item in your latest scan. One line names the undercut ones, once per visit; the Ledger tab lists them, and a right-click there cancels one." },
+  { key = "sightings", short = "Contribute players seen (PvP ladder)", label = "Contribute the players you see, for the PvP ladder", tip = "Notes the name, faction, class and level of every player the client shows you (your target, mouseovers, nameplates, your group, battleground scoreboards, your guild roster, /who). AHledger sync sends the names, and ahledger.com reads each one's kills and rank from Blizzard's own character profiles for the PvP ladder. Names and what anyone nearby can see, nothing about you. Needs Contribute scans on." },
   { key = "watchSync", short = "Watchlist in step with your account", label = "Keep the watchlist in step with your account on ahledger.com", tip = "AHledger sync sends items you watch here to your account and brings back the ones you watch on the site, so both lists are the same. Alert prices stay where they were set. Needs sync paired with your account." },
   { key = "questRewards", short = "Quest rewards: mark the best value", label = "Quest rewards: mark the best value", tip = "When a quest offers a choice, each option shows its worth (median or vendor, whichever is more) and the best one is marked." },
   { key = "mailSummary", short = "Mailbox: auction summary in chat", label = "Mailbox: one line on what the auction house sent", tip = "On opening the mailbox: how many sold and for how much, how many expired, outbid, won or cancelled. Nothing is opened or taken." },
@@ -287,6 +288,11 @@ function NS.OnLogin()
   if not db.intro0110 then
     db.intro0110 = true
     NS.Print("0.11.0: the Ledger tab (/ahl ledger) keeps what you post, sell and buy, from the auction house and its mail, and when your auctions list loads the addon says which of them are undercut.")
+  end
+  -- Once, after updating to 0.12.0: the players you see seed the PvP ladder.
+  if not db.intro0120 then
+    db.intro0120 = true
+    NS.Print("0.12.0: the names of players you see (target, mouseover, scoreboards, guild, /who) now seed the PvP ladder on ahledger.com, which reads kills and ranks from Blizzard's own character profiles. Names only; /ahl set sightings off turns it off.")
   end
   -- Once, in the two weeks after launch (Site.lua; off with siteLinks).
   local launch = NS.LaunchNudge and NS.LaunchNudge(db, time and time() or nil)

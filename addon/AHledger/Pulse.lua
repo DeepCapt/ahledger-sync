@@ -18,18 +18,27 @@ NS.PULSE_MIN_QTY = 3 -- listed both times, so one odd listing does not make a tr
 NS.PULSE_MIN_PCT = 15
 NS.PULSE_TOP = 3
 local KEEP_MIN_VALUE = 1000 -- rows worth keeping for the next comparison
-local MAX_ROWS = 20000
+local MAX_ROWS = 8000 -- the most valuable rows when a table has more
+local OTHER_MARKET_KEEP_S = 14 * 86400 -- baselines of markets not played lately go
 
 -- "id:median:qty;..." for the rows worth comparing later, sorted so the string is stable. Pure.
 function NS.PulsePack(items)
-  local parts, n = {}, 0
+  local rows = {}
   for id, r in pairs(items or {}) do
     if r.median and r.median >= KEEP_MIN_VALUE and (r.qty or 0) >= 1 then
-      n = n + 1
-      if n > MAX_ROWS then break end
-      parts[n] = string.format("%d:%d:%d", id, math.floor(r.median), math.floor(r.qty or 0))
+      rows[#rows + 1] = { id = id, median = math.floor(r.median), qty = math.floor(r.qty or 0) }
     end
   end
+  if #rows > MAX_ROWS then
+    -- The most valuable rows are the ones a mover is worth reporting on; the same rows every time.
+    table.sort(rows, function(a, b)
+      if a.median ~= b.median then return a.median > b.median end
+      return a.id < b.id
+    end)
+    for i = #rows, MAX_ROWS + 1, -1 do rows[i] = nil end
+  end
+  local parts = {}
+  for i, r in ipairs(rows) do parts[i] = string.format("%d:%d:%d", r.id, r.median, r.qty) end
   table.sort(parts)
   return table.concat(parts, ";")
 end
@@ -112,6 +121,9 @@ function NS.MarketPulse(force)
   local t = NS.TableFor(market)
   if not t or t.seed or not t.updated or t.updated == 0 then return nil end
   db.pulse = db.pulse or {}
+  for m, p in pairs(db.pulse) do
+    if m ~= market and (tonumber(p.updated) or 0) < NS.Now() - OTHER_MARKET_KEEP_S then db.pulse[m] = nil end
+  end
   local prev = db.pulse[market]
   local line = nil
   if prev and prev.updated and prev.updated < t.updated then

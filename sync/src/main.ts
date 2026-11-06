@@ -17,7 +17,9 @@ import {
   launchAtFor,
   ledgerFromSavedVariables,
   localeFromSavedVariables,
+  sightingsFromSavedVariables,
   type AddonLedgerEntry,
+  type AddonSighting,
   observationOn,
   observationsFromSavedVariables,
   questsFromSavedVariables,
@@ -91,10 +93,10 @@ interface RefreshResult {
     quests: number;
   } | null;
   /** The account watchlist written for the addon, when the server answered. */
-  watch: { linked: boolean; at: number; items: number } | null;
+  watch: { linked: boolean; at: number; savedAt: number; items: number } | null;
 }
 
-const VERSION = '0.2.24';
+const VERSION = '0.2.26';
 /** Where the saved-variables file sits, written the way this system writes paths. */
 const PATH_EXAMPLE = /Macintosh|Mac OS X/.test(navigator.userAgent)
   ? '/Applications/World of Warcraft/…/WTF/Account/ACCOUNT/SavedVariables/AHledger.lua'
@@ -363,6 +365,10 @@ async function uploadPending(reason: string): Promise<void> {
   busy = true;
   try {
     const text = await invoke<string>('read_scan_file', { path: settings.savedVariablesPath });
+    forgetMarksIfIdentityChanged();
+    // The ledger is the player's own record for their account page, not a contribution, so it
+    // goes up whether or not scans do.
+    await uploadLedger(text);
     if (!contributionOn(text)) {
       setStatus(
         `Watching <b>${escapeHtml(settings.savedVariablesPath)}</b><br/>Contribution is off in the addon settings (/ahl), so scans stay on this machine.`,
@@ -398,7 +404,7 @@ async function uploadPending(reason: string): Promise<void> {
     // scan (every scan already uploaded) never sent them, and a key could upload for weeks
     // without a single source line reaching the site.
     await uploadObservations(text, newest?.addon ?? scans[0]?.addon ?? 'unknown', newest?.build);
-    await uploadLedger(text);
+    await uploadSightings(text, newest?.region ?? scans[0]?.region ?? settings.region);
     const uploaded = loadUploaded();
     const pending = scans.filter((s) => !uploaded.has(scanKey(s)));
     if (pending.length === 0) {
@@ -497,11 +503,61 @@ function hashOf(s: string): string {
   return (h >>> 0).toString(16) + ':' + s.length;
 }
 
+/** Hash of the last sightings table sent, so an unchanged table is not sent again. */
+const SIGHTINGS_KEY = 'ahl.sightings';
+
 /**
- * The addon's item source table (what dropped from what, vendor stock, quest rewards), sent
- * whole whenever it changed. The server keeps counts as maxima per line, so sending the same
- * table again would change nothing; the hash just saves the round trip.
+ * The players the addon saw (0.12.0): names with faction, class, level and ruleset, sent whole
+ * whenever the table changed. New names join the PvP ladder on ahledger.com; the server keeps
+ * nothing about who saw them. US and EU only: the ladder reads Blizzard's profile API, which
+ * covers those two regions.
  */
+async function uploadSightings(text: string, region: string): Promise<void> {
+  if (region !== 'us' && region !== 'eu') return;
+  let items: AddonSighting[];
+  try {
+    items = sightingsFromSavedVariables(text);
+  } catch {
+    return;
+  }
+  if (items.length === 0) return;
+  const payload = JSON.stringify({ v: 1, region, items });
+  const hash = hashOf(payload);
+  let last: string | null = null;
+  try {
+    last = localStorage.getItem(SIGHTINGS_KEY);
+  } catch {
+    last = null;
+  }
+  if (last === hash) return;
+  try {
+    const res = await invoke<UploadResult>('upload_sightings', { body: payload });
+    if (res.status === 200) {
+      const parsed = JSON.parse(res.body) as { added?: number };
+      log(
+        `players seen: ${items.length} names sent, ${parsed.added ?? 0} new to the PvP ladder`,
+        'ok',
+      );
+      try {
+        localStorage.setItem(SIGHTINGS_KEY, hash);
+      } catch {
+        // a lost hash only costs one extra send
+      }
+    } else if (res.status === 400) {
+      log(`players seen refused: ${errorText(res.body)}`, 'err');
+      try {
+        localStorage.setItem(SIGHTINGS_KEY, hash);
+      } catch {
+        // as above
+      }
+    } else if (res.status !== 404) {
+      log(`players seen not sent (HTTP ${res.status}): ${errorText(res.body)}; will retry`, 'err');
+    }
+  } catch (err) {
+    log(`players seen not sent: ${String(err)}`, 'err');
+  }
+}
+
 /** Hash of the last ledger sent, so an unchanged ledger is not sent again. */
 const LEDGER_KEY = 'ahl.ledger';
 
@@ -518,7 +574,7 @@ async function uploadLedger(text: string): Promise<void> {
     return;
   }
   if (entries.length === 0) return;
-  const payload = JSON.stringify({ v: 1, entries });
+  const payload = JSON.stringify({ v: 1, game: gameSlug(), entries });
   const hash = hashOf(payload);
   let last: string | null = null;
   try {
@@ -532,13 +588,21 @@ async function uploadLedger(text: string): Promise<void> {
     if (res.status === 200) {
       const parsed = JSON.parse(res.body) as { linked?: boolean; stored?: number };
       if (parsed.linked === false) {
-        log('ledger: this key is not paired with an account, so your sales stay in game only');
-      } else {
-        log(
-          `ledger: ${entries.length} entries sent, ${parsed.stored ?? 0} new on your account page`,
-          'ok',
-        );
+        // Not remembered as sent: once the key is paired, the next tick sends it for real.
+        if (last !== 'unlinked') {
+          log('ledger: this key is not paired with an account, so your sales stay in game only');
+        }
+        try {
+          localStorage.setItem(LEDGER_KEY, 'unlinked');
+        } catch {
+          // nothing to remember
+        }
+        return;
       }
+      log(
+        `ledger: ${entries.length} entries sent, ${parsed.stored ?? 0} new on your account page`,
+        'ok',
+      );
       try {
         localStorage.setItem(LEDGER_KEY, hash);
       } catch {
@@ -559,6 +623,11 @@ async function uploadLedger(text: string): Promise<void> {
   }
 }
 
+/**
+ * The addon's item source table (what dropped from what, vendor stock, quest rewards), sent
+ * whole whenever it changed. The server keeps counts as maxima per line, so sending the same
+ * table again would change nothing; the hash just saves the round trip.
+ */
 async function uploadObservations(text: string, addon: string, build?: string): Promise<void> {
   if (!observationOn(text)) return;
   const records = observationsFromSavedVariables(text);
@@ -627,8 +696,28 @@ function contributionOn(luaText: string): boolean {
   }
 }
 
-/** The server time of the last watchlist answer applied, so only newer changes are sent. */
+/** When the saved file the server last read was written, so only newer watch changes are sent. */
 const WATCH_SINCE_KEY = 'ahl.watchSince';
+/** The key id and file the stored marks belong to; a change clears them (0.2.26). */
+const IDENTITY_KEY = 'ahl.identity';
+
+/**
+ * Every "already sent" mark (scans, item sources, the ledger, the sightings, the watch mark)
+ * describes one key on one saved file. Pair a different key, or point sync at another file, and
+ * the marks would say the new account already has what it has never seen; so they go.
+ */
+function forgetMarksIfIdentityChanged(): void {
+  const identity = `${settings.keyId}|${settings.savedVariablesPath}`;
+  try {
+    if (localStorage.getItem(IDENTITY_KEY) === identity) return;
+    for (const k of [UPLOADED_KEY, OBSERVATIONS_KEY, LEDGER_KEY, SIGHTINGS_KEY, WATCH_SINCE_KEY]) {
+      localStorage.removeItem(k);
+    }
+    localStorage.setItem(IDENTITY_KEY, identity);
+  } catch {
+    // no storage: nothing was remembered either
+  }
+}
 
 interface WatchPayload {
   since: number;
@@ -692,6 +781,11 @@ export function watchPayloadFrom(luaText: string, since: number): WatchPayload |
   return { since: Math.max(0, Math.floor(since) || 0), savedAt, items, removed };
 }
 
+/** The game sync is set to, in the words the API uses. */
+function gameSlug(): 'forever' | 'classic-era' {
+  return settings.game === 'classic-era' ? 'classic-era' : 'forever';
+}
+
 function watchSince(): number {
   try {
     return Number(localStorage.getItem(WATCH_SINCE_KEY) ?? 0) || 0;
@@ -707,18 +801,21 @@ async function refreshTables(reason: string): Promise<RefreshResult | null> {
   try {
     // The watchlist rides along: what the saved file holds goes up, the account's list comes
     // back in the data file. A file that cannot be read sends nothing.
+    forgetMarksIfIdentityChanged();
     let watch: string | null = null;
     try {
       const text = await invoke<string>('read_scan_file', { path: settings.savedVariablesPath });
       const payload = watchPayloadFrom(text, watchSince());
-      if (payload) watch = JSON.stringify(payload);
+      if (payload) watch = JSON.stringify({ ...payload, game: gameSlug() });
     } catch {
       watch = null;
     }
     const res = await invoke<RefreshResult>('refresh_price_tables', { watch });
     if (res.watch?.linked) {
       try {
-        localStorage.setItem(WATCH_SINCE_KEY, String(res.watch.at));
+        // The mark is the saved file the server has now processed: a change stamped in game
+        // after that file was written is newer than it, whatever the clock said when sync ran.
+        localStorage.setItem(WATCH_SINCE_KEY, String(res.watch.savedAt));
       } catch {
         // a lost mark only resends the same changes, which the server applies once
       }

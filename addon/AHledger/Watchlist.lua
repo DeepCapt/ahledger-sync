@@ -123,9 +123,13 @@ function NS.WatchSyncApply(db, remote, nameOf)
       added[#added + 1] = id
     end
   end
+  -- Ids the site received and did not keep (its list is capped, and it knows only its catalog):
+  -- not on the site, but not removed there either, so they stay here.
+  local dropped = {}
+  for id in pairs(type(remote.dropped) == "table" and remote.dropped or {}) do dropped[tonumber(id) or id] = true end
   for id, w in pairs(db.watch) do
     local onSite = remote.items[id] ~= nil or remote.items[tostring(id)] ~= nil
-    if not onSite and (tonumber(w.addedAt) or 0) <= savedAt then
+    if not onSite and not dropped[id] and (tonumber(w.addedAt) or 0) <= savedAt then
       db.watch[id] = nil
       removed[#removed + 1] = id
     end
@@ -361,7 +365,7 @@ function NS.WatchCommand(arg)
     local id, name = itemFrom(rest)
     if not id then NS.Print("usage: /ahl watch appears [item] 12g 50s (the price is optional)") return end
     local price = UI.ParsePrice(rest:match("%](.*)$") or "")
-    if not watched()[id] then NS.WatchAdd(id, name) end
+    if not watched()[id] then watched()[id] = { name = name, addedAt = NS.Now() } end
     local w = watched()[id]
     if w.appears and not (price and price > 0) then
       w.appears, w.appearsMax, w.appearsSeen = nil, nil, nil
@@ -378,7 +382,7 @@ function NS.WatchCommand(arg)
     local id, name = itemFrom(rest)
     local price = UI.ParsePrice(rest:match("%](.*)$") or "")
     if not id then NS.Print("usage: /ahl watch alert [item] 12g 50s") return end
-    if not watched()[id] then NS.WatchAdd(id, name) end
+    if not watched()[id] then watched()[id] = { name = name, addedAt = NS.Now() } end
     if price and price > 0 then
       watched()[id].below = price
       NS.Print(string.format("alert when %s drops to %s or below", name or id, NS.Gold(price)))

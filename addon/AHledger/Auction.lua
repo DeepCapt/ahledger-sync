@@ -19,6 +19,7 @@ local GetItemInfo = (C_Item and C_Item.GetItemInfo) or GetItemInfo
 
 local MARKUP = 1.10
 local panel = nil
+local setQuantity -- defined below the plan; the panel's Qty button closes over this local
 local hooked = {}
 local warned = {}
 
@@ -188,7 +189,7 @@ function NS.PostingPlan(row, carried)
 end
 
 -- Fills the quantity box of the commodities sell frame. Posting stays the player's click.
-local function setQuantity(n)
+setQuantity = function(n)
   if not n or n <= 0 then return end
   local ok = guard("posting plan", function()
     local frame = AuctionHouseFrame and AuctionHouseFrame.CommoditiesSellFrame

@@ -156,7 +156,6 @@ NS.BAG_DOT = {
   vendor = { 1, 0.82, 0.25 },
   junk = { 0.5, 0.5, 0.52 },
 }
-NS.BAG_DOT_WORD = { watch = "on your watchlist", auction = "worth auctioning", vendor = "vendor it", junk = "junk" }
 
 -- "watch" | "auction" | "vendor" | "junk" | nil for an item. The vendor dot needs a known median
 -- (the vendor beats the auction house), so soulbound gear with no listing stays plain. Pure.
