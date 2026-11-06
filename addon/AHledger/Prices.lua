@@ -275,3 +275,55 @@ function NS.PaceCell(row)
   if not pace then return "|cff9d9d9d-|r" end
   return NS.PaceColour(pace.tier) .. NS.RoughCount(pace.perDay) .. "|r"
 end
+
+-- ---------------------------------------------------------------------------------------------
+-- Other markets (0.10.0): the same item on the other faction's house and on the cheapest house
+-- in the region. AHledger sync writes every market's table into the data file, so this is a
+-- lookup in what is already loaded, never a download. Pure.
+-- ---------------------------------------------------------------------------------------------
+
+-- The other faction's market key, or nil when the key names no faction.
+function NS.OtherFaction(market)
+  local game, ruleset, faction, region = (market or ""):match("^([^/]+)/([^/]+)/([^/]+)/([^/]+)$")
+  if not game then return nil end
+  local other = faction == "horde" and "alliance" or (faction == "alliance" and "horde") or nil
+  if not other then return nil end
+  return string.format("%s/%s/%s/%s", game, ruleset, other, region)
+end
+
+-- Every market with a table in the same game and region as `market`, other than itself.
+function NS.RegionMarkets(market)
+  local game, _, _, region = (market or ""):match("^([^/]+)/([^/]+)/([^/]+)/([^/]+)$")
+  local out = {}
+  if not game then return out end
+  for _, m in ipairs(NS.KnownMarkets()) do
+    if m ~= market and m:sub(1, #game + 1) == game .. "/" and m:sub(-(#region + 1)) == "/" .. region then
+      out[#out + 1] = m
+    end
+  end
+  return out
+end
+
+-- { other = { market, row } or nil, cheapest = { market, row } or nil }: the other faction's row
+-- when its table prices the item, and the region market with the lowest median when it is under
+-- this market's (or any priced market when the item is not priced here). Shipped snapshots are
+-- skipped, since a snapshot price is not one to travel for.
+function NS.CrossMarket(itemID, market)
+  market = market or NS.Market()
+  local out = {}
+  local other = NS.OtherFaction(market)
+  if other then
+    local row = NS.Price(itemID, other)
+    if row and row.median and not NS.TableIsSeed(other) then out.other = { market = other, row = row } end
+  end
+  local here = NS.Price(itemID, market)
+  local best = nil
+  for _, m in ipairs(NS.RegionMarkets(market)) do
+    local row = NS.Price(itemID, m)
+    if row and row.median and (row.qty or 0) > 0 and not NS.TableIsSeed(m) then
+      if not best or row.median < best.row.median then best = { market = m, row = row } end
+    end
+  end
+  if best and (not here or not here.median or best.row.median < here.median) then out.cheapest = best end
+  return out
+end

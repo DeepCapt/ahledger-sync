@@ -72,7 +72,40 @@ local function compactBlock(ctx)
     out[#out + 1] = { "line", NS.PaceColour(pace.tier) .. NS.PaceText(pace) .. R }
   end
   if ctx.setting("tooltipBags") and ctx.owned then out[#out + 1] = { "line", GREY .. ctx.owned .. R } end
+  if ctx.shiftHint then out[#out + 1] = { "line", GREY .. "Hold Shift for the full block" .. R } end
   return out
+end
+
+-- The other-market lines for the full block (option tooltipMarkets): the other faction's median
+-- with how it compares, and the cheapest house in the region when it beats this one. `cross` is
+-- NS.CrossMarket's answer, `here` this market's row. Pure.
+function NS.MarketLines(cross, here)
+  local out = {}
+  if type(cross) ~= "table" then return out end
+  if cross.other and cross.other.row and cross.other.row.median then
+    local o = cross.other.row
+    local rel = ""
+    if here and here.median and here.median > 0 then
+      local p = (o.median - here.median) / here.median * 100
+      if p <= -5 then rel = string.format(", %.0f%% less", -p)
+      elseif p >= 5 then rel = string.format(", %.0f%% more", p)
+      else rel = ", about the same" end
+    end
+    out[#out + 1] = GREY .. "Other faction: " .. R .. NS.Gold(o.median) .. GREY .. " on " .. NS.MarketLabel(cross.other.market) .. rel .. R
+  end
+  if cross.cheapest and cross.cheapest.row and cross.cheapest.row.median then
+    local c = cross.cheapest.row
+    out[#out + 1] = GREY .. "Cheapest in region: " .. R .. NS.Gold(c.median) .. GREY .. " on " .. NS.MarketLabel(cross.cheapest.market) .. string.format(", %d listed", c.qty or 0) .. R
+  end
+  return out
+end
+
+-- Whether the compact block is the one to draw right now: the compact option, or the Shift-for-
+-- more option (0.10.0) while Shift is up. Pure apart from the key state.
+function NS.TooltipCompactNow()
+  if NS.Setting("tooltipCompact") then return true end
+  if NS.Setting("tooltipShiftMore") then return not ((IsShiftKeyDown and IsShiftKeyDown()) and true or false) end
+  return false
 end
 
 -- The lines of the block, as {kind, left, right}: kind "double" for the header, "line" for the
@@ -121,6 +154,10 @@ function NS.TooltipBlock(ctx)
   else
     out[#out + 1] = { "double", "|cffff9d2fAHledger|r", GREY .. "no price table (/ahl import)" .. R }
   end
+  -- Craft or buy (0.10.0): the remembered recipe's reagent cost against the median.
+  if ctx.craft then out[#out + 1] = { "line", ctx.craft } end
+  -- The other faction and the cheapest house in the region (0.10.0).
+  for _, l in ipairs(ctx.markets or {}) do out[#out + 1] = { "line", l } end
   local tail = {}
   if ctx.setting("tooltipVendor") and ctx.vendor and ctx.vendor > 0 then
     tail[#tail + 1] = "Vendor pays " .. NS.Gold(ctx.vendor)
@@ -153,12 +190,17 @@ local function addLines(tooltip, itemID, link)
   local vendor = select(11, GetItemInfo(link or itemID))
   local de = (NS.Setting("tooltipDisenchant") and NS.DisenchantValue) and NS.DisenchantValue(link or itemID, market) or nil
   local owned = (NS.Setting("tooltipBags") and NS.BagLine) and NS.BagLine(itemID, row) or nil
+  local compact = NS.TooltipCompactNow()
+  -- The full block's extra lines: what crafting it would cost, and the other markets.
+  local craft = (not compact and NS.Setting("tooltipCraft") and NS.CraftCost) and NS.CraftLine(NS.CraftCost(itemID, market), row and row.median) or nil
+  local markets = (not compact and NS.Setting("tooltipMarkets") and NS.CrossMarket) and NS.MarketLines(NS.CrossMarket(itemID, market), row) or nil
 
   tooltip:AddLine(" ")
   for _, l in ipairs(NS.TooltipBlock({
     row = row, hasTable = t ~= nil, marketLabel = NS.MarketLabel(market), age = t and NS.TableAge(market) or nil,
     vendor = vendor, disenchant = de, owned = owned, setting = NS.Setting,
-    compact = NS.Setting("tooltipCompact") and true or false,
+    compact = compact, craft = craft, markets = markets,
+    shiftHint = compact and NS.Setting("tooltipShiftMore") and not NS.Setting("tooltipCompact") and true or false,
     seedDate = (t and t.seed) and NS.TableDate(market) or nil,
   })) do
     if l[1] == "double" then tooltip:AddDoubleLine(l[2], l[3]) else tooltip:AddLine(l[2]) end
@@ -173,20 +215,55 @@ local function onTooltipSetItem(tooltip)
   if itemID then addLines(tooltip, itemID, link) end
 end
 
--- With the Shift-only option on, pressing or releasing Shift over an item redraws the tooltip
--- so the block appears or goes at once, instead of on the next hover. The owner's own OnEnter
--- rebuilds the tooltip the way the game does; the stamp is cleared so the block is added again.
+-- With the Shift-only or the Shift-for-more option on, pressing or releasing Shift over an item
+-- redraws the tooltip so the block appears, grows or goes at once, instead of on the next hover.
+-- The owner's own OnEnter rebuilds the tooltip the way the game does; the stamp is cleared so
+-- the block is added again.
 local function onModifierChanged(_, _, key)
   if key ~= "LSHIFT" and key ~= "RSHIFT" then return end
-  if not NS.Setting("tooltip") or not NS.Setting("tooltipShift") then return end
+  if not NS.Setting("tooltip") then return end
+  if not NS.Setting("tooltipShift") and not (NS.Setting("tooltipShiftMore") and not NS.Setting("tooltipCompact")) then return end
   local tip = GameTooltip
   if not tip or tip:IsForbidden() or not tip:IsShown() or not tip.GetOwner then return end
   local owner = tip:GetOwner()
-  local onEnter = owner and owner.GetScript and owner:GetScript("OnEnter")
-  if not onEnter then return end
+  if not owner then return end
+  NS.RedrawTooltip(tip, owner)
+end
+
+-- Draws the owner's tooltip again. A protected frame (an action button, a bag slot) must never
+-- have its own OnEnter run from addon code: everything that handler touches would be tainted,
+-- and the game blocked ActionButton:SetAttribute() on the next click (0.10.0). For those the
+-- tooltip is set directly, from what the frame says it shows; anything else gets its OnEnter.
+-- Returns true when something was redrawn. Pure apart from the frames, for the harness.
+function NS.RedrawTooltip(tip, owner)
+  local protected = owner.IsProtected and owner:IsProtected()
+  if protected then
+    local action = owner.action or (owner.GetAttribute and owner:GetAttribute("action"))
+    local slot = owner.GetID and owner:GetID()
+    local bag = owner.GetBagID and owner:GetBagID()
+    if not bag and owner.GetParent and owner:GetParent() and owner:GetParent().GetID then bag = owner:GetParent():GetID() end
+    if type(action) == "number" and tip.SetAction then
+      tip.AHledgerStamp = nil
+      tip:Hide()
+      tip:SetOwner(owner, "ANCHOR_RIGHT")
+      tip:SetAction(action)
+      return true
+    end
+    if type(bag) == "number" and type(slot) == "number" and tip.SetBagItem then
+      tip.AHledgerStamp = nil
+      tip:Hide()
+      tip:SetOwner(owner, "ANCHOR_RIGHT")
+      tip:SetBagItem(bag, slot)
+      return true
+    end
+    return false
+  end
+  local onEnter = owner.GetScript and owner:GetScript("OnEnter")
+  if not onEnter then return false end
   tip.AHledgerStamp = nil
   tip:Hide()
   onEnter(owner)
+  return true
 end
 
 function NS.InitTooltip()

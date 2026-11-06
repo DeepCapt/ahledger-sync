@@ -69,11 +69,93 @@ local function alertLabel(w)
 end
 
 function NS.WatchAdd(id, name)
-  watched()[id] = watched()[id] or {}
-  watched()[id].name = name
+  local db = NS.Db()
+  local w = watched()[id]
+  if not w then
+    w = { addedAt = NS.Now() }
+    watched()[id] = w
+    -- Added again after a removal: the removal is no longer news for the site.
+    if db.watchRemoved then db.watchRemoved[id] = nil end
+  end
+  w.name = name or w.name
   saveWatch()
   if NS.RefreshWindow then NS.RefreshWindow() end
   if NS.RefreshBar then NS.RefreshBar() end
+  if NS.RefreshBagDots then NS.RefreshBagDots() end
+end
+
+-- Stops watching an item and notes when, so the account list on ahledger.com drops it too
+-- (sync sends the note; WatchSyncApply below reads what came back).
+function NS.WatchRemove(id)
+  if not watched()[id] then return false end
+  watched()[id] = nil
+  local db = NS.Db()
+  db.watchRemoved = db.watchRemoved or {}
+  db.watchRemoved[id] = NS.Now()
+  saveWatch()
+  if NS.RefreshBagDots then NS.RefreshBagDots() end
+  return true
+end
+
+-- ---------------------------------------------------------------------------------------------
+-- One watchlist with the account (0.10.0). AHledger sync sends the saved file's watch table and
+-- removal notes to ahledger.com and writes the merged list back into the data file as
+--   AHledgerData.watch = { at = <server time>, savedAt = <when the saved file it read was
+--   written>, items = { [item id] = 1 or "market", ... } }
+-- At login the two lists are brought level. Something on the site's list and not here is added,
+-- unless it was removed here after the site last saw this file. Something here and not on the
+-- site's list was removed on the site, provided the site had seen it: it was in a file written
+-- after it was added. Anything newer than the file the site read is left alone, so a watch set
+-- a minute ago is never undone by an old answer. Pure; returns the ids added and removed.
+-- ---------------------------------------------------------------------------------------------
+
+function NS.WatchSyncApply(db, remote, nameOf)
+  local added, removed = {}, {}
+  if type(remote) ~= "table" or type(remote.items) ~= "table" then return added, removed end
+  local at, savedAt = tonumber(remote.at) or 0, tonumber(remote.savedAt) or 0
+  if at <= (tonumber(db.watchSyncAt) or 0) then return added, removed end
+  db.watch = db.watch or {}
+  db.watchRemoved = db.watchRemoved or {}
+  for id in pairs(remote.items) do
+    id = tonumber(id)
+    if id and not db.watch[id] and not ((db.watchRemoved[id] or 0) > savedAt) then
+      db.watch[id] = { name = nameOf and nameOf(id) or nil, addedAt = at, fromSite = true }
+      added[#added + 1] = id
+    end
+  end
+  for id, w in pairs(db.watch) do
+    local onSite = remote.items[id] ~= nil or remote.items[tostring(id)] ~= nil
+    if not onSite and (tonumber(w.addedAt) or 0) <= savedAt then
+      db.watch[id] = nil
+      removed[#removed + 1] = id
+    end
+  end
+  for id, ts in pairs(db.watchRemoved) do
+    if ts <= savedAt then db.watchRemoved[id] = nil end
+  end
+  table.sort(added)
+  table.sort(removed)
+  db.watchSyncAt = at
+  return added, removed
+end
+
+-- At login: applies what sync wrote, says what changed, and refreshes what shows the list.
+function NS.WatchSyncFromData()
+  if not NS.Setting("watchSync") then return nil end
+  local remote = AHledgerData and AHledgerData.watch
+  if type(remote) ~= "table" then return nil end
+  local added, removed = NS.WatchSyncApply(NS.Db(), remote, function(id) return (GetItemInfo(id)) end)
+  if #added == 0 and #removed == 0 then return nil end
+  local parts = {}
+  if #added > 0 then parts[#parts + 1] = string.format("%d added from your account", #added) end
+  if #removed > 0 then parts[#parts + 1] = string.format("%d removed on the site", #removed) end
+  local line = "watchlist synced with ahledger.com: " .. table.concat(parts, ", ")
+  NS.Print(line)
+  saveWatch()
+  if NS.RefreshWindow then NS.RefreshWindow() end
+  if NS.RefreshBar then NS.RefreshBar() end
+  if NS.RefreshBagDots then NS.RefreshBagDots() end
+  return line
 end
 
 -- ---------------------------------------------------------------------------------------------
@@ -149,9 +231,8 @@ local function build(parent)
     onClick = function(row, button)
       if button == "RightButton" and IsControlKeyDown and IsControlKeyDown() then NS.ShowItemLink(row.itemID, row.name) return end
       if button == "RightButton" then
-        watched()[row.itemID] = nil
+        NS.WatchRemove(row.itemID)
         if tab.selected == row.itemID then tab.selected = nil end
-        saveWatch()
         refresh()
       else
         tab.selected = row.itemID
@@ -246,9 +327,8 @@ local function build(parent)
   end
   tab.removeClicked = function()
     if not tab.selected then NS.Print("select an item in the list first") return end
-    watched()[tab.selected] = nil
+    NS.WatchRemove(tab.selected)
     tab.selected = nil
-    saveWatch()
     refresh()
   end
   NS.WatchTab = tab
@@ -271,9 +351,8 @@ function NS.WatchCommand(arg)
   elseif sub == "remove" or sub == "rm" then
     local id, name = itemFrom(rest)
     if id and watched()[id] then
-      watched()[id] = nil
+      NS.WatchRemove(id)
       NS.Print("no longer watching " .. (name or id))
-      saveWatch()
       if NS.RefreshWindow then NS.RefreshWindow() end
     else
       NS.Print("not watching that item")
@@ -282,7 +361,7 @@ function NS.WatchCommand(arg)
     local id, name = itemFrom(rest)
     if not id then NS.Print("usage: /ahl watch appears [item] 12g 50s (the price is optional)") return end
     local price = UI.ParsePrice(rest:match("%](.*)$") or "")
-    watched()[id] = watched()[id] or { name = name }
+    if not watched()[id] then NS.WatchAdd(id, name) end
     local w = watched()[id]
     if w.appears and not (price and price > 0) then
       w.appears, w.appearsMax, w.appearsSeen = nil, nil, nil
@@ -299,7 +378,7 @@ function NS.WatchCommand(arg)
     local id, name = itemFrom(rest)
     local price = UI.ParsePrice(rest:match("%](.*)$") or "")
     if not id then NS.Print("usage: /ahl watch alert [item] 12g 50s") return end
-    watched()[id] = watched()[id] or { name = name }
+    if not watched()[id] then NS.WatchAdd(id, name) end
     if price and price > 0 then
       watched()[id].below = price
       NS.Print(string.format("alert when %s drops to %s or below", name or id, NS.Gold(price)))

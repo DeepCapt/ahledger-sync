@@ -785,6 +785,8 @@ pub struct RefreshResult {
     pub newest: u64,
     /// What this key added to the site over the last week, when the server answered.
     pub contribution: Option<Contribution>,
+    /// The account watchlist written for the addon, when the server answered.
+    pub watch: Option<WatchSummary>,
 }
 
 /// The counts `/v1/upload/stats` answers with: nothing about which items or realms.
@@ -825,6 +827,63 @@ fn render_contribution(c: &Contribution) -> String {
     )
 }
 
+/// The server's answer to `/v1/upload/watch`: the account's watchlist, whole.
+#[derive(Deserialize, Default)]
+struct WatchAnswer {
+    #[serde(default)]
+    linked: bool,
+    #[serde(default)]
+    at: u64,
+    #[serde(default, rename = "savedAt")]
+    saved_at: u64,
+    #[serde(default)]
+    items: Vec<WatchItem>,
+}
+#[derive(Deserialize)]
+struct WatchItem {
+    #[serde(default)]
+    id: u64,
+}
+
+/// What the webview shows and remembers about the watchlist sync.
+#[derive(Serialize, Clone, Copy)]
+pub struct WatchSummary {
+    pub linked: bool,
+    pub at: u64,
+    pub items: usize,
+}
+
+/// The Lua block the addon reads to bring its watchlist level with the account: integers only,
+/// sorted, so nothing from the network can change what the file means. Markets are left out;
+/// the addon prices a watched item on its own market.
+fn render_watch(a: &WatchAnswer) -> String {
+    let mut ids: Vec<u64> = a
+        .items
+        .iter()
+        .map(|i| i.id)
+        .filter(|&i| i > 0 && i < 100_000_000)
+        .collect();
+    ids.sort_unstable();
+    ids.dedup();
+    let body: Vec<String> = ids.iter().map(|i| format!("[{}] = 1", i)).collect();
+    format!(
+        "AHledgerData.watch = {{ at = {}, savedAt = {}, items = {{ {} }} }}\n",
+        a.at,
+        a.saved_at,
+        body.join(", ")
+    )
+}
+
+/// Sends the saved file's watchlist (the JSON the webview built) and returns the account's
+/// list. No key, offline, an older server, or a refusal: none, and the file carries no block.
+async fn sync_watch(app: &AppHandle, body: String) -> Option<WatchAnswer> {
+    let res = signed_post(app, "/v1/upload/watch", body, false).await.ok()?;
+    if res.status != 200 {
+        return None;
+    }
+    serde_json::from_str::<WatchAnswer>(&res.body).ok()
+}
+
 /// Asks the site what this key contributed. No key yet, offline, or an older server: none,
 /// and the tables are written without the line.
 async fn fetch_contribution(app: &AppHandle) -> Option<Contribution> {
@@ -840,7 +899,10 @@ async fn fetch_contribution(app: &AppHandle) -> Option<Contribution> {
 /// Fetches every market's price table for the configured game and writes them as one Lua file
 /// the addon reads at login (`AHledgerData[market] = { updated, count, text }`).
 #[tauri::command]
-async fn refresh_price_tables(app: AppHandle) -> Result<RefreshResult, String> {
+async fn refresh_price_tables(
+    app: AppHandle,
+    watch: Option<String>,
+) -> Result<RefreshResult, String> {
     let settings = load_settings(&app)?;
     if settings.saved_variables_path.is_empty() {
         return Err("set the SavedVariables path first".to_string());
@@ -896,6 +958,16 @@ async fn refresh_price_tables(app: AppHandle) -> Result<RefreshResult, String> {
     if let Some(c) = contribution.as_ref() {
         out.push_str(&render_contribution(c));
     }
+    // The watchlist, when the webview found one in the saved file and the key has an account.
+    let answer = match watch {
+        Some(body) if !body.is_empty() => sync_watch(&app, body).await,
+        _ => None,
+    };
+    if let Some(a) = answer.as_ref() {
+        if a.linked {
+            out.push_str(&render_watch(a));
+        }
+    }
     write_replace(&target, "lua.tmp", out.as_bytes(), false)?;
     Ok(RefreshResult {
         path: target.to_string_lossy().into_owned(),
@@ -903,6 +975,11 @@ async fn refresh_price_tables(app: AppHandle) -> Result<RefreshResult, String> {
         items: count_items,
         newest,
         contribution,
+        watch: answer.as_ref().map(|a| WatchSummary {
+            linked: a.linked,
+            at: a.at,
+            items: a.items.len(),
+        }),
     })
 }
 
@@ -1040,8 +1117,33 @@ mod tests {
         assert!(!upload_key_ok("ahl_abcdefghij012345", "test-secret_not-a-real-key_0123456789\nab"));
     }
 
-    use super::{data_file_for, is_newer, render_contribution, render_price_table, sign, Contribution};
+    use super::{
+        data_file_for, is_newer, render_contribution, render_price_table, render_watch, sign,
+        Contribution, WatchAnswer, WatchItem,
+    };
     use std::fs;
+
+    #[test]
+    fn watch_renders_sorted_integer_ids_only() {
+        let a = WatchAnswer {
+            linked: true,
+            at: 1790000100,
+            saved_at: 1790000000,
+            items: vec![
+                WatchItem { id: 12784 },
+                WatchItem { id: 2589 },
+                WatchItem { id: 2589 },
+                WatchItem { id: 0 },
+                WatchItem { id: 999_999_999 },
+            ],
+        };
+        assert_eq!(
+            render_watch(&a),
+            "AHledgerData.watch = { at = 1790000100, savedAt = 1790000000, items = { [2589] = 1, [12784] = 1 } }\n"
+        );
+        let empty = WatchAnswer { linked: true, at: 5, saved_at: 0, items: vec![] };
+        assert_eq!(render_watch(&empty), "AHledgerData.watch = { at = 5, savedAt = 0, items = {  } }\n");
+    }
 
     #[test]
     fn newer_versions_compare_numerically() {

@@ -246,8 +246,75 @@ function NS.CraftingTable()
     r.resultRow = r.resultID and NS.Price(r.resultID, market) or nil
     r.perDay = r.resultRow and r.resultRow.perDay or nil
     r.profitDay = NS.ProfitPerDay(margin, r.made, r.perDay)
+    NS.RememberRecipe(r, profession)
   end
   return recipes, profession
+end
+
+-- ---------------------------------------------------------------------------------------------
+-- Craft or buy (0.10.0). Every learned recipe's reagent list is remembered in AHledgerDB.recipes
+-- by the item it makes whenever a profession window prices it, so an item's tooltip can say what
+-- crafting it would cost long after the window is closed, at whatever the medians are then.
+-- ---------------------------------------------------------------------------------------------
+
+function NS.RememberRecipe(r, profession)
+  if type(r) ~= "table" or not r.resultID or #(r.reagents or {}) == 0 then return end
+  local reagents = {}
+  for _, g in ipairs(r.reagents) do
+    if g.itemID then reagents[#reagents + 1] = { g.itemID, g.qty or 1 } end
+  end
+  if #reagents == 0 then return end
+  local db = NS.Db()
+  db.recipes = db.recipes or {}
+  local made = tonumber(r.made) or 1
+  db.recipes[r.resultID] = { reagents = reagents, made = made > 0 and made or 1, prof = profession, at = NS.Now() }
+end
+
+-- Reagent cost per unit made at the market's medians: { cost, missing, prof, made } or nil when
+-- no recipe for the item is remembered. missing counts reagents without a price, which are left
+-- out of the cost, so the cost is never overstated. Pure.
+function NS.CraftCost(itemID, market)
+  local db = NS.Db()
+  local r = db.recipes and db.recipes[itemID]
+  if not r or type(r.reagents) ~= "table" then return nil end
+  local cost, missing = 0, 0
+  for _, g in ipairs(r.reagents) do
+    local price = priceOf(g[1], market or NS.Market())
+    if price then cost = cost + price * (g[2] or 1) else missing = missing + 1 end
+  end
+  local made = (tonumber(r.made) and r.made > 0) and r.made or 1
+  return { cost = cost / made, missing = missing, prof = r.prof, made = made }
+end
+
+-- The tooltip line from a CraftCost answer and the item's median: "Craft it" when the reagents
+-- come in at least 10% under the median with every reagent priced, "Buy it" when they cost 10%
+-- or more over it, "Craft or buy" between. Pure.
+function NS.CraftLine(craft, median)
+  if type(craft) ~= "table" then return nil end
+  if craft.missing > 0 and craft.cost <= 0 then return nil end
+  local who = craft.prof and (" with " .. craft.prof) or ""
+  local unpriced = craft.missing > 0 and (UI.GREY .. string.format(" (%d reagent%s unpriced)", craft.missing, craft.missing == 1 and "" or "s") .. UI.R) or ""
+  if not median or median <= 0 then
+    return UI.GREY .. "Reagents cost " .. UI.R .. NS.Gold(craft.cost) .. UI.GREY .. " to craft" .. who .. UI.R .. unpriced
+  end
+  local pct = (craft.cost - median) / median * 100
+  if craft.missing == 0 and pct <= -10 then
+    return UI.UP .. "Craft it" .. UI.R .. UI.GREY .. ": reagents " .. UI.R .. NS.Gold(craft.cost) .. UI.GREY .. string.format(", %.0f%% under the median%s", -pct, who) .. UI.R
+  elseif pct >= 10 then
+    return "|cffffd23fBuy it|r" .. UI.GREY .. ": reagents " .. UI.R .. NS.Gold(craft.cost) .. UI.GREY .. string.format(", %.0f%% over the median%s", pct, who) .. UI.R .. unpriced
+  end
+  return UI.GREY .. "Craft or buy: reagents " .. UI.R .. NS.Gold(craft.cost) .. UI.GREY .. ", about the median" .. who .. UI.R .. unpriced
+end
+
+-- The open profession's name, when the client says.
+local function currentProfession()
+  if C_TradeSkillUI and C_TradeSkillUI.GetBaseProfessionInfo then
+    local ok, info = pcall(C_TradeSkillUI.GetBaseProfessionInfo)
+    if ok and type(info) == "table" and info.professionName then return info.professionName end
+  end
+  if TradeSkillFrame and TradeSkillFrame:IsShown() and GetTradeSkillLine then return GetTradeSkillLine() end
+  if CraftFrame and CraftFrame:IsShown() and GetCraftDisplaySkillLine then return GetCraftDisplaySkillLine() end
+  return nil
 end
 
 -- The margin per item made times the units the market buys a day: the most a crafter supplying
@@ -295,6 +362,7 @@ local function showLine(recipe)
     return
   end
   local cost, missing, total, margin = economics(recipe.reagents, recipe.resultID, recipe.made, NS.Market())
+  NS.RememberRecipe(recipe, currentProfession())
   local text = marginText(cost, total, margin, recipe.resultID)
   if #missing > 0 then
     text = text .. "\n" .. UI.GREY .. "no price for " .. table.concat(missing, ", ") .. UI.R
@@ -466,6 +534,7 @@ function NS.DecorateRecipeRow(frame, node)
   ensureDot(frame)
   local cost, missing, total, margin = economics(recipe.reagents, recipe.resultID, recipe.made, NS.Market())
   recipe.cost, recipe.missing, recipe.total, recipe.margin = cost, missing, total, margin
+  NS.RememberRecipe(recipe, currentProfession())
   frame.AHledgerRecipe = recipe
   frame.AHledgerBand = NS.MarginBand(recipe) or "unknown"
   local v = BAND[frame.AHledgerBand]

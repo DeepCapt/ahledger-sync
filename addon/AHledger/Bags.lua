@@ -143,17 +143,132 @@ end
 
 NS.RegisterTab({ key = "bags", label = "Bags", order = 4, build = build, refresh = refresh })
 
+-- ---------------------------------------------------------------------------------------------
+-- Bag slot dots (0.10.0). A small square in the bottom-left corner of a bag slot: green, worth
+-- auctioning (the median beats the vendor by the same 1.5x the appraisal uses); yellow, vendor
+-- it (the vendor pays more than the auction median); grey, junk; blue, on your watchlist. Slots
+-- that are none of these stay as they are, so most of a bag is untouched.
+-- ---------------------------------------------------------------------------------------------
+
+NS.BAG_DOT = {
+  watch = { 0.35, 0.62, 1 },
+  auction = { 0.24, 0.86, 0.42 },
+  vendor = { 1, 0.82, 0.25 },
+  junk = { 0.5, 0.5, 0.52 },
+}
+NS.BAG_DOT_WORD = { watch = "on your watchlist", auction = "worth auctioning", vendor = "vendor it", junk = "junk" }
+
+-- "watch" | "auction" | "vendor" | "junk" | nil for an item. The vendor dot needs a known median
+-- (the vendor beats the auction house), so soulbound gear with no listing stays plain. Pure.
+function NS.BagDotKind(itemID, median, vendor, quality, watched)
+  if not itemID then return nil end
+  if watched then return "watch" end
+  if quality == 0 then return "junk" end
+  local verdict = NS.SellVerdict(median, vendor)
+  if verdict == "auction" then return "auction" end
+  if verdict == "vendor" and median then return "vendor" end
+  return nil
+end
+
+function NS.BagDotForSlot(bag, slot)
+  local id, _, link = slotItem(bag, slot)
+  if not id then return nil end
+  local p = NS.Price(id, NS.Market())
+  local _, _, quality, _, _, _, _, _, _, _, vendor = GetItemInfo(link or id)
+  local w = NS.Db().watch
+  return NS.BagDotKind(id, p and p.median, vendor, quality, w and w[id] ~= nil)
+end
+
+local DOT_SIZE, DOT_INSET = 8, 3
+-- The dots live here, keyed by button, never as a field on the button: bag slots are protected
+-- frames, and nothing of ours is written into them.
+local dots = setmetatable({}, { __mode = "k" })
+
+local function paint(button, bag, slot)
+  if type(button) ~= "table" then return end
+  local kind = NS.Setting("bagDots") and NS.BagDotForSlot(bag, slot) or nil
+  local dot = dots[button]
+  if not kind then
+    if dot then dot:Hide() end
+    return
+  end
+  if not dot then
+    dot = button:CreateTexture(nil, "OVERLAY", nil, 7)
+    dot:SetSize(DOT_SIZE, DOT_SIZE)
+    dot:SetPoint("BOTTOMLEFT", button, "BOTTOMLEFT", DOT_INSET, DOT_INSET)
+    dots[button] = dot
+  end
+  local c = NS.BAG_DOT[kind]
+  dot:SetColorTexture(c[1], c[2], c[3], 0.95)
+  dot:Show()
+end
+
+-- Every slot of one container frame, whichever shape the client gives it: the modern frame
+-- enumerates its item buttons, the Classic frame names them ContainerFrameNItemM.
+local function paintFrame(frame)
+  if type(frame) ~= "table" or not frame.GetID then return end
+  local bag = frame:GetID()
+  if frame.EnumerateValidItems then
+    for a, b in frame:EnumerateValidItems() do
+      local button = type(b) == "table" and b or a
+      if type(button) == "table" and button.GetID then
+        local id = (button.GetBagID and button:GetBagID()) or bag
+        pcall(paint, button, id, button:GetID())
+      end
+    end
+  elseif frame.GetName and frame:GetName() then
+    local name = frame:GetName()
+    for i = 1, (frame.size or 36) do
+      local button = _G[name .. "Item" .. i]
+      if button and button.IsShown and button:IsShown() and button.GetID then pcall(paint, button, bag, button:GetID()) end
+    end
+  end
+end
+
+-- Every open bag again: after a setting or watchlist change, and when a price table loads.
+function NS.RefreshBagDots()
+  local frames = {}
+  for i = 1, (NUM_CONTAINER_FRAMES or 13) do
+    local f = _G["ContainerFrame" .. i]
+    if f and f.IsShown and f:IsShown() then frames[#frames + 1] = f end
+  end
+  if ContainerFrameCombinedBags and ContainerFrameCombinedBags:IsShown() then frames[#frames + 1] = ContainerFrameCombinedBags end
+  for _, f in ipairs(frames) do pcall(paintFrame, f) end
+end
+
+local bagsHooked = false
+function NS.HookBags()
+  if bagsHooked then return end
+  bagsHooked = true
+  pcall(function()
+    local any = false
+    for i = 1, (NUM_CONTAINER_FRAMES or 13) do
+      local f = _G["ContainerFrame" .. i]
+      if f and f.UpdateItems then
+        hooksecurefunc(f, "UpdateItems", paintFrame)
+        any = true
+      end
+    end
+    if ContainerFrameCombinedBags and ContainerFrameCombinedBags.UpdateItems then
+      hooksecurefunc(ContainerFrameCombinedBags, "UpdateItems", paintFrame)
+      any = true
+    end
+    if not any and ContainerFrame_Update then hooksecurefunc("ContainerFrame_Update", paintFrame) end
+  end)
+end
+
 -- Refresh the tab when bag contents change, at most once a second.
 local pending = false
 local events = CreateFrame("Frame")
 events:RegisterEvent("BAG_UPDATE_DELAYED")
 events:SetScript("OnEvent", function()
-  if pending or not tab.list then return end
+  if pending then return end
   pending = true
   if C_Timer and C_Timer.After then
     C_Timer.After(1, function()
       pending = false
       if NS.WindowShowing and NS.WindowShowing("bags") then refresh() end
+      NS.RefreshBagDots()
     end)
   else
     pending = false

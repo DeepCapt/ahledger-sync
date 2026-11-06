@@ -127,6 +127,10 @@ local function ensurePanel(anchor)
   panel.median:SetPoint("LEFT", panel.undercut, "RIGHT", 4, 0)
   panel.markup = UI.Button(panel, "+10%", 74, function() setPrice(panel.s and panel.s.markup) end)
   panel.markup:SetPoint("LEFT", panel.median, "RIGHT", 4, 0)
+  -- The plan's quantity, above the price buttons, for commodities only.
+  panel.qty = UI.Button(panel, "Qty", 74, function() setQuantity(panel.qty.n) end)
+  panel.qty:SetPoint("BOTTOMLEFT", 10, 36)
+  panel.qty:Hide()
   return panel
 end
 
@@ -157,6 +161,46 @@ function NS.PostingPaceLines(row, carried)
   return out
 end
 
+-- ---------------------------------------------------------------------------------------------
+-- Posting plan (0.10.0): how many to post and for how long, from the sales pace. An auction that
+-- expires costs its deposit, so the plan picks the shortest duration in which what you post
+-- would sell, and when you carry more than two days of sales it says how many to hold back.
+-- { qty, hours, hold, text } or nil without a pace or a count. Pure.
+-- ---------------------------------------------------------------------------------------------
+
+local DURATIONS = { 12, 24, 48 }
+
+function NS.PostingPlan(row, carried)
+  local pace = NS.Pace(row)
+  carried = math.floor(tonumber(carried) or 0)
+  if not pace or carried <= 0 then return nil end
+  if pace.perDay <= 0 then
+    return { qty = 1, hours = 48, hold = carried - 1, text = "None sold this week: post one for 48 hours and see whether it goes before listing more." }
+  end
+  for _, hours in ipairs(DURATIONS) do
+    local sells = math.floor(pace.perDay * hours / 24)
+    if carried <= sells then
+      return { qty = carried, hours = hours, hold = 0, text = string.format("Post all %d for %d hours: about %s sell in that time.", carried, hours, NS.RoughCount(sells)) }
+    end
+  end
+  local qty = math.max(1, math.floor(pace.perDay * 2))
+  return { qty = qty, hours = 48, hold = carried - qty, text = string.format("Post %d of your %d for 48 hours: about that many sell in two days. List the rest once they go, so no deposit is lost on an expired auction.", qty, carried) }
+end
+
+-- Fills the quantity box of the commodities sell frame. Posting stays the player's click.
+local function setQuantity(n)
+  if not n or n <= 0 then return end
+  local ok = guard("posting plan", function()
+    local frame = AuctionHouseFrame and AuctionHouseFrame.CommoditiesSellFrame
+    if not frame or not frame:IsShown() or not frame.QuantityInput then error("no commodity in the sell frame") end
+    local q = frame.QuantityInput
+    if q.SetQuantity then q:SetQuantity(n)
+    elseif q.InputBox and q.InputBox.SetNumber then q.InputBox:SetNumber(n)
+    else error("the quantity box has no setter on this client") end
+  end)
+  if ok then NS.Print("quantity set to " .. n .. "; check the duration and post when ready") end
+end
+
 function NS.ShowPosting(anchor, itemID, isCommodity)
   if not NS.Setting("postingHelper") then return end
   if not itemID then
@@ -169,11 +213,13 @@ function NS.ShowPosting(anchor, itemID, isCommodity)
   p.s = s
   local name, link = GetItemInfo(itemID)
   p.item:SetText(link or name or ("item " .. itemID))
+  p.qty:Hide()
   if not s then
     p.lines:SetText(UI.GREY .. "No price for this item on " .. NS.MarketLabel(NS.Market()) .. " yet." .. UI.R)
     p.undercut:Disable()
     p.median:Disable()
     p.markup:Disable()
+    p:SetHeight(168)
   else
     local row = s.row
     local lines = {}
@@ -182,13 +228,27 @@ function NS.ShowPosting(anchor, itemID, isCommodity)
     if live then lines[#lines + 1] = "Lowest right now " .. NS.Gold(live) end
     if row and (row.lo or row.hi) then lines[#lines + 1] = "30 day " .. NS.Gold(row.lo or row.median) .. UI.GREY .. " to " .. UI.R .. NS.Gold(row.hi or row.median) end
     if row and row.qty and row.qty > 0 then lines[#lines + 1] = UI.Comma(row.qty) .. " listed" end
+    local carried = GetItemCount and GetItemCount(itemID) or 0
     -- Sell pace, and how long what you carry would take to sell at it.
-    for _, l in ipairs(NS.PostingPaceLines(row, GetItemCount and GetItemCount(itemID) or 0) or {}) do
+    for _, l in ipairs(NS.PostingPaceLines(row, carried) or {}) do
       lines[#lines + 1] = l
+    end
+    -- The plan: how many, for how long, and what to hold back.
+    local plan = NS.Setting("postingPlan") and NS.PostingPlan(row, carried) or nil
+    local extra = 0
+    if plan then
+      lines[#lines + 1] = UI.ACCENT .. "Plan" .. UI.R .. UI.GREY .. ": " .. plan.text .. UI.R
+      extra = 2 -- the plan wraps to a second or third line
+      if isCommodity and plan.qty > 0 and plan.qty < carried then
+        p.qty:SetText("Qty " .. plan.qty)
+        p.qty.n = plan.qty
+        p.qty:Show()
+        extra = extra + 2
+      end
     end
     p.lines:SetText(table.concat(lines, "\n"))
     -- Room for every line above the buttons.
-    p:SetHeight(math.max(168, 46 + #lines * 15 + 44))
+    p:SetHeight(math.max(168, 46 + (#lines + extra) * 15 + 44))
     if s.undercut then p.undercut:Enable() else p.undercut:Disable() end
     if s.median then p.median:Enable() else p.median:Disable() end
     if s.markup then p.markup:Enable() else p.markup:Disable() end

@@ -17,7 +17,7 @@
 ]]
 
 local ADDON_NAME, NS = ...
-NS.VERSION = "0.9.10"
+NS.VERSION = "0.10.1"
 
 local MAX_SCANS_PER_MARKET = 3 -- newest scans kept per realm+faction (about 1 MB each at 50k listings)
 local MAX_SCANS_TOTAL = 12 -- hard ceiling on the SavedVariables file across every realm and faction
@@ -109,6 +109,18 @@ local DEFAULTS = {
   -- when nobody has scanned this market lately.
   reloadPrompt = true,
   scanNudge = true,
+  -- 0.10.0: reload on leaving the auction house after a scan (off until the player says so),
+  -- the watchlist kept in step with the account on ahledger.com, craft-or-buy and other-market
+  -- lines in tooltips, Shift for the full tooltip block, bag slot dots, the market pulse at
+  -- login, and the posting plan.
+  autoUpload = false,
+  watchSync = true,
+  tooltipCraft = true,
+  tooltipMarkets = true,
+  tooltipShiftMore = true,
+  bagDots = true,
+  pulse = true,
+  postingPlan = true,
 }
 -- Settings written while something is dragged: not worth a "last change" note each frame.
 local SILENT = { minimapAngle = true, barX = true, barY = true }
@@ -499,6 +511,42 @@ function NS.UploadButtonWanted(state)
   return state.unsent == true and state.contribute == true
 end
 
+-- ---------------------------------------------------------------------------------------------
+-- Reload on leaving the house (0.10.0)
+--
+-- The option autoUpload, off by default: when the auction house closes with a scan from this
+-- session still unsent, the interface reloads a moment later, which writes the scan for sync.
+-- The player turned it on knowing what it does; it still never runs in combat, and it says so
+-- in chat first. Pure apart from the setting, for the harness.
+-- ---------------------------------------------------------------------------------------------
+
+local AUTO_UPLOAD_DELAY = 1.5 -- seconds after the house closes, so its frame is gone first
+
+function NS.AutoUploadWanted(state)
+  state = state or NS.ScanState()
+  if not NS.Setting("autoUpload") then return false end
+  if state.phase == "waiting" or state.phase == "saving" then return false end
+  return state.unsent == true and state.contribute == true
+end
+
+-- Called when the house closes. Returns true when a reload was scheduled.
+function NS.AutoUploadOnClose()
+  if not NS.AutoUploadWanted() then return false end
+  if InCombatLockdown and InCombatLockdown() then
+    print_("the scan will be saved for sync when you next reload; not reloading in combat")
+    return false
+  end
+  print_("reloading in a moment to save the scan for AHledger sync (/ahl set autoUpload off stops this)")
+  if C_Timer and C_Timer.After then
+    C_Timer.After(AUTO_UPLOAD_DELAY, function()
+      if NS.AutoUploadWanted() then NS.UploadNow() end
+    end)
+  else
+    NS.UploadNow()
+  end
+  return true
+end
+
 local buttons = {}
 local uploadButton = nil
 local startTicker -- defined below; the clock runs whenever a button shows something that moves
@@ -863,6 +911,8 @@ function NS.ScanEvent(event)
       endScan()
       print_("auction house closed before the listing arrived; scan discarded")
     end
+    -- With autoUpload on, a scan from this session goes to disk now rather than at logout.
+    pcall(NS.AutoUploadOnClose)
   elseif event == "REPLICATE_ITEM_LIST_UPDATE" then
     if scanning and not packing then
       beginPacking()
@@ -1033,8 +1083,12 @@ SlashCmdList["AHLEDGER"] = function(msg)
     if NS.LinkCommand then NS.LinkCommand(arg) end
   elseif cmd == "pace" then
     for _, line in ipairs(NS.PaceHelp and NS.PaceHelp() or {}) do print_(line) end
+  elseif cmd == "pulse" then
+    if NS.MarketPulse then
+      if not NS.MarketPulse(true) then print_("nothing has moved since the last price table, or there is no earlier table to compare with yet") end
+    end
   else
-    print_("commands: /ahl (window) | deals | bags | craft | options | scan | upload | status | pace | link [item] | import | watch add|remove|alert | bar [lock|unlock|reset] | set <option> on|off | market <key|detect> | auto on|off | clear")
+    print_("commands: /ahl (window) | deals | bags | craft | options | scan | upload | status | pace | pulse | link [item] | import | watch add|remove|alert | bar [lock|unlock|reset] | set <option> on|off | market <key|detect> | auto on|off | clear")
   end
 end
 
@@ -1075,6 +1129,9 @@ AHledger:SetScript("OnEvent", function(_, event, arg1)
     -- the numbers from the data file).
     local invite = NS.OptInNudge(ensureDb(), NS.Contribution and NS.Contribution() or nil)
     if invite then print_(invite) end
+    -- The account watchlist sync wrote into the data file, and what moved since the last table.
+    if NS.WatchSyncFromData then pcall(NS.WatchSyncFromData) end
+    if NS.MarketPulse then pcall(NS.MarketPulse) end
     -- Safety net: mirror every minute in case a change slipped past the explicit saves.
     if NS.PersistSave and C_Timer and C_Timer.After then
       local function tick()
@@ -1085,6 +1142,9 @@ AHledger:SetScript("OnEvent", function(_, event, arg1)
     end
     if NS.OnLogin then NS.OnLogin() end
   elseif event == "PLAYER_LOGOUT" then
+    -- When this file was last written (logout and /reload both come through here), so sync and
+    -- the site know which watchlist changes the saved file already carries (Watchlist.lua).
+    ensureDb().savedAt = now()
     if NS.PersistSave then NS.PersistSave(true) end
   else
     NS.ScanEvent(event)

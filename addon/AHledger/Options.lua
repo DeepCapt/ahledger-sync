@@ -35,6 +35,14 @@ local OPTIONS = {
   { key = "barPace", short = "Ledger bar: AH sales speed", label = "Ledger bar: show auction house sales speed", tip = "How much of your bags sells fast on the auction house, how many deals sell, and how fast each watchlist item sells." },
   { key = "barTicker", short = "Ledger bar: watchlist ticker", label = "Ledger bar: walk the watchlist", tip = "The last segment shows one watched item at a time with its median and 7-day change, changing every few seconds." },
   { key = "tooltipCompact", short = "Tooltip: compact, one line and a verdict", label = "Tooltip: compact block", tip = "Replaces the full block with one line (median, 7-day change, units listed) and a verdict: Auction it or Vendor it. The other tooltip switches still apply." },
+  { key = "tooltipShiftMore", short = "Tooltip: compact until Shift is held", label = "Tooltip: compact block, hold Shift for the full one", tip = "Keeps item tooltips short (the compact block) and shows the full block, with the range, sales pace, craft cost, other markets, vendor and disenchant lines, while Shift is held. The compact block option above wins when it is on." },
+  { key = "tooltipCraft", short = "Tooltip: craft or buy", label = "Tooltip: say whether to craft it or buy it", tip = "For an item one of your characters can make: the reagent cost at current medians against the item's median. Craft it, Buy it, or Craft or buy. Recipes are remembered whenever a profession window is open." },
+  { key = "tooltipMarkets", short = "Tooltip: other faction and cheapest market", label = "Tooltip: show the other faction's price and the cheapest market in the region", tip = "In the full block: the item's median on the other faction's house, and the house in your region where it is cheapest when that beats yours. Uses the tables AHledger sync already writes." },
+  { key = "bagDots", short = "Bags: dots on slots", label = "Bags: a dot on each slot worth noting", tip = "Bottom-left corner of a bag slot. Green: worth auctioning, the median beats the vendor by half again. Yellow: vendor it, the vendor pays more than the auction median. Grey: junk. Blue: on your watchlist." },
+  { key = "pulse", short = "Market pulse at login", label = "Say what moved on your market at login", tip = "When a newer price table loads, one line with the three biggest risers and fallers since the last one you saw. /ahl pulse prints it again." },
+  { key = "postingPlan", short = "Auction house: posting plan", label = "Auction house: how many to post and for how long", tip = "In the posting panel: from the sales pace, how many of what you carry to post, for which duration, and how many to hold back so no deposit is lost on an expired auction. For stackable goods a button fills the quantity." },
+  { key = "autoUpload", short = "Reload after a scan when leaving the auction house", label = "Reload the interface when you leave the auction house after a scan", tip = "Off by default. On: when the auction house closes with a scan from this session not yet saved to disk, the interface reloads a moment later, which writes the scan so AHledger sync can send it. Never in combat. The Save and upload button does the same by hand." },
+  { key = "watchSync", short = "Watchlist in step with your account", label = "Keep the watchlist in step with your account on ahledger.com", tip = "AHledger sync sends items you watch here to your account and brings back the ones you watch on the site, so both lists are the same. Alert prices stay where they were set. Needs sync paired with your account." },
   { key = "questRewards", short = "Quest rewards: mark the best value", label = "Quest rewards: mark the best value", tip = "When a quest offers a choice, each option shows its worth (median or vendor, whichever is more) and the best one is marked." },
   { key = "mailSummary", short = "Mailbox: auction summary in chat", label = "Mailbox: one line on what the auction house sent", tip = "On opening the mailbox: how many sold and for how much, how many expired, outbid, won or cancelled. Nothing is opened or taken." },
   { key = "scanSummary", short = "Scan: deals in chat when it finishes", label = "Scan: say what deals it found", tip = "After a scan saves, one line with the number of deals and the best three." },
@@ -140,6 +148,7 @@ function NS.OnSettingChanged(key)
   if (key == "bar" or key == "barLocked" or key == "barTicker" or key == "dealsPercent" or key == "dealsMinValue") and NS.RefreshBar then NS.RefreshBar() end
   if key == "vendorFlips" and NS.RefreshVendorFlips then NS.RefreshVendorFlips() end
   if key == "questRewards" and NS.RefreshQuestRewards then NS.RefreshQuestRewards() end
+  if key == "bagDots" and NS.RefreshBagDots then NS.RefreshBagDots() end
   if key ~= "minimapAngle" and key ~= "barX" and key ~= "barY" and NS.RefreshWindow then NS.RefreshWindow() end
 end
 
@@ -240,6 +249,7 @@ end
 function NS.OnLogin()
   if NS.HookCrafting then NS.HookCrafting() end
   if NS.HookAuctionHouse then NS.HookAuctionHouse() end
+  if NS.HookBags then NS.HookBags() end
   if NS.RefreshMinimap then NS.RefreshMinimap() end
   if NS.InitBroker then NS.InitBroker() end
   if NS.InitBar then NS.InitBar() end
@@ -264,6 +274,11 @@ function NS.OnLogin()
     if market:find("^forever/rppvp/") then
       NS.Print("0.9.9: RP PvP is its own market now. Prices here come from RP PvP scans only; the first ones fill in as players scan.")
     end
+  end
+  -- Once, after updating to 0.10.0: what changed in the tooltip, and where the rest is.
+  if not db.intro0100 then
+    db.intro0100 = true
+    NS.Print("0.10.0: item tooltips are compact until you hold Shift, which adds the sales pace, craft-or-buy, the other faction's price and the cheapest market. Bag slots carry dots, the posting panel plans quantities, and your watchlist follows your account. Every one of these is a switch in /ahl options.")
   end
   -- Once, in the two weeks after launch (Site.lua; off with siteLinks).
   local launch = NS.LaunchNudge and NS.LaunchNudge(db, time and time() or nil)

@@ -88,9 +88,11 @@ interface RefreshResult {
     sources: number;
     quests: number;
   } | null;
+  /** The account watchlist written for the addon, when the server answered. */
+  watch: { linked: boolean; at: number; items: number } | null;
 }
 
-const VERSION = '0.2.22';
+const VERSION = '0.2.23';
 /** Where the saved-variables file sits, written the way this system writes paths. */
 const PATH_EXAMPLE = /Macintosh|Mac OS X/.test(navigator.userAgent)
   ? '/Applications/World of Warcraft/…/WTF/Account/ACCOUNT/SavedVariables/AHledger.lua'
@@ -565,12 +567,107 @@ function contributionOn(luaText: string): boolean {
   }
 }
 
+/** The server time of the last watchlist answer applied, so only newer changes are sent. */
+const WATCH_SINCE_KEY = 'ahl.watchSince';
+
+interface WatchPayload {
+  since: number;
+  savedAt: number;
+  items: Array<{ id: number; addedAt?: number }>;
+  removed: Array<{ id: number; at: number }>;
+}
+
+/**
+ * The addon's watchlist as the saved file holds it (addon 0.10.0): every watched item with
+ * when it was added, the removal notes, and when the file was written. Null when the file has
+ * no watch table or the addon's watchSync switch is off, in which case nothing is sent and the
+ * data file carries no list. Pure apart from the stored `since`.
+ */
+export function watchPayloadFrom(luaText: string, since: number): WatchPayload | null {
+  let root: Record<string, unknown>;
+  try {
+    root = parseLuaSavedVariables(luaText) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  const db = root['AHledgerDB'];
+  if (!db || typeof db !== 'object' || Array.isArray(db)) return null;
+  const d = db as Record<string, unknown>;
+  const s = d['settings'];
+  if (
+    s &&
+    typeof s === 'object' &&
+    !Array.isArray(s) &&
+    (s as Record<string, unknown>)['watchSync'] === false
+  ) {
+    return null;
+  }
+  const watch = d['watch'];
+  if (!watch || typeof watch !== 'object' || Array.isArray(watch)) return null;
+  const id = (k: string) => {
+    const n = Number(k);
+    return Number.isInteger(n) && n > 0 && n < 100_000_000 ? n : null;
+  };
+  const items: WatchPayload['items'] = [];
+  for (const [k, v] of Object.entries(watch as Record<string, unknown>)) {
+    const n = id(k);
+    if (n === null) continue;
+    const addedAt = v && typeof v === 'object' ? (v as Record<string, unknown>)['addedAt'] : null;
+    items.push(
+      typeof addedAt === 'number' && addedAt > 0
+        ? { id: n, addedAt: Math.floor(addedAt) }
+        : { id: n },
+    );
+  }
+  const removed: WatchPayload['removed'] = [];
+  const rm = d['watchRemoved'];
+  if (rm && typeof rm === 'object' && !Array.isArray(rm)) {
+    for (const [k, v] of Object.entries(rm as Record<string, unknown>)) {
+      const n = id(k);
+      if (n !== null && typeof v === 'number' && v > 0) removed.push({ id: n, at: Math.floor(v) });
+    }
+  }
+  const savedAt =
+    typeof d['savedAt'] === 'number' && d['savedAt'] > 0 ? Math.floor(d['savedAt']) : 0;
+  return { since: Math.max(0, Math.floor(since) || 0), savedAt, items, removed };
+}
+
+function watchSince(): number {
+  try {
+    return Number(localStorage.getItem(WATCH_SINCE_KEY) ?? 0) || 0;
+  } catch {
+    return 0;
+  }
+}
+
 let refreshing = false;
 async function refreshTables(reason: string): Promise<RefreshResult | null> {
   if (refreshing || !settings.savedVariablesPath) return null;
   refreshing = true;
   try {
-    const res = await invoke<RefreshResult>('refresh_price_tables');
+    // The watchlist rides along: what the saved file holds goes up, the account's list comes
+    // back in the data file. A file that cannot be read sends nothing.
+    let watch: string | null = null;
+    try {
+      const text = await invoke<string>('read_scan_file', { path: settings.savedVariablesPath });
+      const payload = watchPayloadFrom(text, watchSince());
+      if (payload) watch = JSON.stringify(payload);
+    } catch {
+      watch = null;
+    }
+    const res = await invoke<RefreshResult>('refresh_price_tables', { watch });
+    if (res.watch?.linked) {
+      try {
+        localStorage.setItem(WATCH_SINCE_KEY, String(res.watch.at));
+      } catch {
+        // a lost mark only resends the same changes, which the server applies once
+      }
+      log(`watchlist: ${res.watch.items} item(s) in step with your account`);
+    } else if (res.watch && !res.watch.linked) {
+      log(
+        'watchlist: this key is not paired with an account, so the in-game list stays on its own',
+      );
+    }
     if (res.newest >= awaitingSince) awaitingSince = 0;
     tableStatusEl.innerHTML = `${res.items.toLocaleString()} prices across ${res.markets} market(s) written to <b>${escapeHtml(res.path)}</b><br/>at ${new Date().toLocaleTimeString()} (${reason}). Type /reload in game to pick them up.`;
     log(
