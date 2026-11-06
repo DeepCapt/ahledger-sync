@@ -31,6 +31,16 @@ local function patternFor(kind)
   return patterns[kind]
 end
 
+-- The kind of auction mail a subject is (sold, pending, expired, outbid, won, cancelled), or
+-- nil for anything else. Pure.
+function NS.MailKind(subject)
+  subject = tostring(subject or "")
+  for _, k in ipairs(KINDS) do
+    if subject:find(patternFor(k[1])) then return k[1] end
+  end
+  return nil
+end
+
 -- Counts auction mails by kind. headers = { { subject, money } }. Pure, so the harness can
 -- feed it subjects.
 function NS.MailSummary(headers)

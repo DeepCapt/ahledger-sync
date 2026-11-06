@@ -42,6 +42,8 @@ local OPTIONS = {
   { key = "pulse", short = "Market pulse at login", label = "Say what moved on your market at login", tip = "When a newer price table loads, one line with the three biggest risers and fallers since the last one you saw. /ahl pulse prints it again." },
   { key = "postingPlan", short = "Auction house: posting plan", label = "Auction house: how many to post and for how long", tip = "In the posting panel: from the sales pace, how many of what you carry to post, for which duration, and how many to hold back so no deposit is lost on an expired auction. For stackable goods a button fills the quantity." },
   { key = "autoUpload", short = "Reload after a scan when leaving the auction house", label = "Reload the interface when you leave the auction house after a scan", tip = "Off by default. On: when the auction house closes with a scan from this session not yet saved to disk, the interface reloads a moment later, which writes the scan so AHledger sync can send it. Never in combat. The Save and upload button does the same by hand." },
+  { key = "ledger", short = "Ledger: posts, sales and purchases", label = "Keep a ledger of what you post, sell and buy", tip = "Noted as you post and as you take the auction house mail: the item, the quantity, the money, the house cut. The Ledger tab sums it per item for the last N days. Nothing is taken or posted by the addon." },
+  { key = "undercutCheck", short = "Auction house: say when your auctions are undercut", label = "Auction house: say when your auctions are undercut", tip = "When your auctions list loads, each listing is set against the lowest price for that item in your latest scan. One line names the undercut ones, once per visit; the Ledger tab lists them, and a right-click there cancels one." },
   { key = "watchSync", short = "Watchlist in step with your account", label = "Keep the watchlist in step with your account on ahledger.com", tip = "AHledger sync sends items you watch here to your account and brings back the ones you watch on the site, so both lists are the same. Alert prices stay where they were set. Needs sync paired with your account." },
   { key = "questRewards", short = "Quest rewards: mark the best value", label = "Quest rewards: mark the best value", tip = "When a quest offers a choice, each option shows its worth (median or vendor, whichever is more) and the best one is marked." },
   { key = "mailSummary", short = "Mailbox: auction summary in chat", label = "Mailbox: one line on what the auction house sent", tip = "On opening the mailbox: how many sold and for how much, how many expired, outbid, won or cancelled. Nothing is opened or taken." },
@@ -250,6 +252,7 @@ function NS.OnLogin()
   if NS.HookCrafting then NS.HookCrafting() end
   if NS.HookAuctionHouse then NS.HookAuctionHouse() end
   if NS.HookBags then NS.HookBags() end
+  if NS.HookLedger then NS.HookLedger() end
   if NS.RefreshMinimap then NS.RefreshMinimap() end
   if NS.InitBroker then NS.InitBroker() end
   if NS.InitBar then NS.InitBar() end
@@ -279,6 +282,11 @@ function NS.OnLogin()
   if not db.intro0100 then
     db.intro0100 = true
     NS.Print("0.10.0: item tooltips are compact until you hold Shift, which adds the sales pace, craft-or-buy, the other faction's price and the cheapest market. Bag slots carry dots, the posting panel plans quantities, and your watchlist follows your account. Every one of these is a switch in /ahl options.")
+  end
+  -- Once, after updating to 0.11.0: the ledger and the undercut check.
+  if not db.intro0110 then
+    db.intro0110 = true
+    NS.Print("0.11.0: the Ledger tab (/ahl ledger) keeps what you post, sell and buy, from the auction house and its mail, and when your auctions list loads the addon says which of them are undercut.")
   end
   -- Once, in the two weeks after launch (Site.lua; off with siteLinks).
   local launch = NS.LaunchNudge and NS.LaunchNudge(db, time and time() or nil)

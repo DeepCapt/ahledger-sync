@@ -17,7 +17,7 @@
 ]]
 
 local ADDON_NAME, NS = ...
-NS.VERSION = "0.10.1"
+NS.VERSION = "0.11.0"
 
 local MAX_SCANS_PER_MARKET = 3 -- newest scans kept per realm+faction (about 1 MB each at 50k listings)
 local MAX_SCANS_TOTAL = 12 -- hard ceiling on the SavedVariables file across every realm and faction
@@ -121,6 +121,10 @@ local DEFAULTS = {
   bagDots = true,
   pulse = true,
   postingPlan = true,
+  -- 0.11.0: the ledger of posts, sales and purchases, and the undercut check.
+  ledger = true,
+  undercutCheck = true,
+  ledgerDays = 7,
 }
 -- Settings written while something is dragged: not worth a "last change" note each frame.
 local SILENT = { minimapAngle = true, barX = true, barY = true }
@@ -1075,7 +1079,7 @@ SlashCmdList["AHLEDGER"] = function(msg)
     print_("stored scans cleared")
   elseif cmd == "" then
     if NS.ToggleWindow then NS.ToggleWindow() else NS.Status() end
-  elseif cmd == "deals" or cmd == "bags" or cmd == "craft" or cmd == "crafting" then
+  elseif cmd == "deals" or cmd == "bags" or cmd == "craft" or cmd == "crafting" or cmd == "ledger" then
     if NS.OpenWindow then NS.OpenWindow(cmd == "crafting" and "craft" or cmd) end
   elseif cmd == "options" or cmd == "config" then
     if NS.OpenOptions then NS.OpenOptions() else NS.Status() end
@@ -1088,7 +1092,7 @@ SlashCmdList["AHLEDGER"] = function(msg)
       if not NS.MarketPulse(true) then print_("nothing has moved since the last price table, or there is no earlier table to compare with yet") end
     end
   else
-    print_("commands: /ahl (window) | deals | bags | craft | options | scan | upload | status | pace | pulse | link [item] | import | watch add|remove|alert | bar [lock|unlock|reset] | set <option> on|off | market <key|detect> | auto on|off | clear")
+    print_("commands: /ahl (window) | deals | bags | craft | ledger | options | scan | upload | status | pace | pulse | link [item] | import | watch add|remove|alert | bar [lock|unlock|reset] | set <option> on|off | market <key|detect> | auto on|off | clear")
   end
 end
 

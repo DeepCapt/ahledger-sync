@@ -15,7 +15,9 @@ import {
   betaFolderMove,
   isBetaClientPath,
   launchAtFor,
+  ledgerFromSavedVariables,
   localeFromSavedVariables,
+  type AddonLedgerEntry,
   observationOn,
   observationsFromSavedVariables,
   questsFromSavedVariables,
@@ -92,7 +94,7 @@ interface RefreshResult {
   watch: { linked: boolean; at: number; items: number } | null;
 }
 
-const VERSION = '0.2.23';
+const VERSION = '0.2.24';
 /** Where the saved-variables file sits, written the way this system writes paths. */
 const PATH_EXAMPLE = /Macintosh|Mac OS X/.test(navigator.userAgent)
   ? '/Applications/World of Warcraft/…/WTF/Account/ACCOUNT/SavedVariables/AHledger.lua'
@@ -396,6 +398,7 @@ async function uploadPending(reason: string): Promise<void> {
     // scan (every scan already uploaded) never sent them, and a key could upload for weeks
     // without a single source line reaching the site.
     await uploadObservations(text, newest?.addon ?? scans[0]?.addon ?? 'unknown', newest?.build);
+    await uploadLedger(text);
     const uploaded = loadUploaded();
     const pending = scans.filter((s) => !uploaded.has(scanKey(s)));
     if (pending.length === 0) {
@@ -499,6 +502,63 @@ function hashOf(s: string): string {
  * whole whenever it changed. The server keeps counts as maxima per line, so sending the same
  * table again would change nothing; the hash just saves the round trip.
  */
+/** Hash of the last ledger sent, so an unchanged ledger is not sent again. */
+const LEDGER_KEY = 'ahl.ledger';
+
+/**
+ * The addon's auction ledger (0.11.0): posts, sales, purchases, expiries and cancellations,
+ * sent whole whenever it changed. The server stores each entry once, so a resend adds nothing;
+ * the hash saves the round trip. A key with no account is told so once per change.
+ */
+async function uploadLedger(text: string): Promise<void> {
+  let entries: AddonLedgerEntry[];
+  try {
+    entries = ledgerFromSavedVariables(text);
+  } catch {
+    return;
+  }
+  if (entries.length === 0) return;
+  const payload = JSON.stringify({ v: 1, entries });
+  const hash = hashOf(payload);
+  let last: string | null = null;
+  try {
+    last = localStorage.getItem(LEDGER_KEY);
+  } catch {
+    last = null;
+  }
+  if (last === hash) return;
+  try {
+    const res = await invoke<UploadResult>('upload_ledger', { body: payload });
+    if (res.status === 200) {
+      const parsed = JSON.parse(res.body) as { linked?: boolean; stored?: number };
+      if (parsed.linked === false) {
+        log('ledger: this key is not paired with an account, so your sales stay in game only');
+      } else {
+        log(
+          `ledger: ${entries.length} entries sent, ${parsed.stored ?? 0} new on your account page`,
+          'ok',
+        );
+      }
+      try {
+        localStorage.setItem(LEDGER_KEY, hash);
+      } catch {
+        // a lost hash only costs one extra send
+      }
+    } else if (res.status === 400) {
+      log(`ledger refused: ${errorText(res.body)}`, 'err');
+      try {
+        localStorage.setItem(LEDGER_KEY, hash);
+      } catch {
+        // as above
+      }
+    } else if (res.status !== 404) {
+      log(`ledger not sent (HTTP ${res.status}): ${errorText(res.body)}; will retry`, 'err');
+    }
+  } catch (err) {
+    log(`ledger not sent: ${String(err)}`, 'err');
+  }
+}
+
 async function uploadObservations(text: string, addon: string, build?: string): Promise<void> {
   if (!observationOn(text)) return;
   const records = observationsFromSavedVariables(text);

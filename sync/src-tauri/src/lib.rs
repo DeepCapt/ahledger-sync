@@ -729,6 +729,12 @@ async fn upload_observations(app: AppHandle, body: String) -> Result<UploadResul
     signed_post(&app, "/v1/upload/observations", body, true).await
 }
 
+/// Gzip, sign, and POST the addon's auction ledger to `/v1/upload/ledger` (0.2.24).
+#[tauri::command]
+async fn upload_ledger(app: AppHandle, body: String) -> Result<UploadResult, String> {
+    signed_post(&app, "/v1/upload/ledger", body, true).await
+}
+
 // ---------------------------------------------------------------------------------------------
 // Price tables: downloaded from the API and written into the addon's data file
 // ---------------------------------------------------------------------------------------------
@@ -1046,6 +1052,7 @@ pub fn run() {
             upload_scan,
             check_key,
             upload_observations,
+            upload_ledger,
             check_for_update,
             open_site_url,
             price_table_path,

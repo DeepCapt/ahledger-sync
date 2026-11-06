@@ -428,6 +428,60 @@ function str(v: LuaValue | undefined): string | undefined {
 }
 
 /** Extract the scans the addon saved. Unknown shapes are skipped rather than thrown. */
+/** One entry of the addon's auction ledger (AHledgerDB.ledger, addon 0.11.0). */
+export interface AddonLedgerEntry {
+  /** Unix seconds. */
+  t: number;
+  k: 'post' | 'sale' | 'buy' | 'expire' | 'cancel';
+  id?: number;
+  name: string;
+  q: number;
+  p: number;
+  cut?: number;
+  dep?: number;
+}
+
+const LEDGER_KIND = new Set(['post', 'sale', 'buy', 'expire', 'cancel']);
+export const LEDGER_MAX_ENTRIES = 3000;
+
+/** The addon's ledger from a SavedVariables file, cleaned; empty when absent. */
+export function ledgerFromSavedVariables(src: string): AddonLedgerEntry[] {
+  const root = parseLuaSavedVariables(src);
+  const db = root['AHledgerDB'];
+  if (!db || typeof db !== 'object' || Array.isArray(db)) return [];
+  const list = (db as Record<string, LuaValue>)['ledger'];
+  if (!Array.isArray(list)) return [];
+  const out: AddonLedgerEntry[] = [];
+  const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
+  for (const raw of list) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
+    const e = raw as Record<string, LuaValue>;
+    const t = num(e['t']);
+    const k = typeof e['k'] === 'string' ? e['k'] : '';
+    const name = typeof e['name'] === 'string' ? e['name'].trim() : '';
+    const q = num(e['q']);
+    const p = num(e['p']);
+    if (t === undefined || t <= 0 || !LEDGER_KIND.has(k) || !name || q === undefined || q <= 0)
+      continue;
+    const id = num(e['id']);
+    const entry: AddonLedgerEntry = {
+      t: Math.floor(t),
+      k: k as AddonLedgerEntry['k'],
+      name: name.slice(0, 120),
+      q: Math.floor(q),
+      p: Math.max(0, Math.floor(p ?? 0)),
+    };
+    if (id !== undefined && id > 0) entry.id = Math.floor(id);
+    const cut = num(e['cut']);
+    const dep = num(e['dep']);
+    if (cut !== undefined && cut > 0) entry.cut = Math.floor(cut);
+    if (dep !== undefined && dep > 0) entry.dep = Math.floor(dep);
+    out.push(entry);
+    if (out.length >= LEDGER_MAX_ENTRIES) break;
+  }
+  return out;
+}
+
 export function scansFromSavedVariables(src: string): SavedScan[] {
   const root = parseLuaSavedVariables(src);
   const db = root['AHledgerDB'];
