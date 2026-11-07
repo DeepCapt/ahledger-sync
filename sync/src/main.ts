@@ -18,7 +18,9 @@ import {
   ledgerFromSavedVariables,
   localeFromSavedVariables,
   sightingsFromSavedVariables,
+  pvpPointsFromSavedVariables,
   type AddonLedgerEntry,
+  type AddonPvpCharacter,
   type AddonSighting,
   observationOn,
   observationsFromSavedVariables,
@@ -54,6 +56,32 @@ interface UploadResult {
   body: string;
   /** Unix time the request was signed with; against the server's clock in a 401 it names a clock problem. */
   sentTs: number;
+  /** Seconds sync adds to this computer's clock to sign, learned from the server (0.2.27). */
+  clockOffset?: number;
+}
+
+let clockNotedAt: number | null = null;
+
+/**
+ * A signed request through the native side. A computer whose clock is more than five minutes
+ * off used to have every upload refused; the native side now signs with the server's time once
+ * a refusal tells it, so this only says so, once per correction, with how to fix the clock.
+ */
+async function signed(cmd: string, args?: Record<string, unknown>): Promise<UploadResult> {
+  const res = await invoke<UploadResult>(cmd, args);
+  const off = res.clockOffset ?? 0;
+  if (Math.abs(off) > 120 && off !== clockNotedAt) {
+    clockNotedAt = off;
+    const mins = Math.round(Math.abs(off) / 60);
+    const span =
+      mins >= 90
+        ? `${Math.round(mins / 60)} hour${Math.round(mins / 60) === 1 ? '' : 's'}`
+        : `${mins} minutes`;
+    log(
+      `this computer's clock is ${span} ${off > 0 ? 'behind' : 'ahead'} of the real time; sync now signs with the server's time, so uploads go through. To fix the clock itself: Windows Settings, Time & language, Date & time, turn on Set time automatically and Set time zone automatically (or pick your zone), then Sync now.`,
+    );
+  }
+  return res;
 }
 
 interface PairStarted {
@@ -94,9 +122,13 @@ interface RefreshResult {
   } | null;
   /** The account watchlist written for the addon, when the server answered. */
   watch: { linked: boolean; at: number; savedAt: number; items: number } | null;
+  /** Characters in the PvP table written for the tooltip (0.2.27), when the server had one. */
+  pvp?: number | null;
+  /** Why the PvP table was not refreshed, when it was not. */
+  pvpError?: string | null;
 }
 
-const VERSION = '0.2.26';
+const VERSION = '0.2.27';
 /** Where the saved-variables file sits, written the way this system writes paths. */
 const PATH_EXAMPLE = /Macintosh|Mac OS X/.test(navigator.userAgent)
   ? '/Applications/World of Warcraft/…/WTF/Account/ACCOUNT/SavedVariables/AHledger.lua'
@@ -405,6 +437,7 @@ async function uploadPending(reason: string): Promise<void> {
     // without a single source line reaching the site.
     await uploadObservations(text, newest?.addon ?? scans[0]?.addon ?? 'unknown', newest?.build);
     await uploadSightings(text, newest?.region ?? scans[0]?.region ?? settings.region);
+    await uploadPvpPoints(text);
     const uploaded = loadUploaded();
     const pending = scans.filter((s) => !uploaded.has(scanKey(s)));
     if (pending.length === 0) {
@@ -429,7 +462,7 @@ async function uploadPending(reason: string): Promise<void> {
         uploaded.add(scanKey(scan));
         continue;
       }
-      const res = await invoke<UploadResult>('upload_scan', { body: JSON.stringify(upload) });
+      const res = await signed('upload_scan', { body: JSON.stringify(upload) });
       const when = new Date(upload.observedAt * 1000).toLocaleString();
       if (res.status === 202) {
         clearProblem();
@@ -503,6 +536,76 @@ function hashOf(s: string): string {
   return (h >>> 0).toString(16) + ':' + s.length;
 }
 
+/** Hash of the last Rank Points log sent, so an unchanged log is not sent again. */
+const PVP_POINTS_KEY = 'ahl.pvpPoints';
+
+/**
+ * The Rank Points the addon read on the player's own characters (addon 0.13.0): sent whole
+ * whenever the log changed, so the site can show each character's progress to the next rank and
+ * what a battleground is worth. Characters on US and EU only, like the ladder. Sent with the
+ * key alone; the site keeps the readings against the character, not the account.
+ */
+async function uploadPvpPoints(text: string): Promise<void> {
+  // The addon's own switch: off, nothing goes, whatever it noted before.
+  if (!addonSettingOn(text, 'pvpPoints')) return;
+  let chars: AddonPvpCharacter[];
+  try {
+    chars = pvpPointsFromSavedVariables(text);
+  } catch {
+    return;
+  }
+  if (chars.length === 0) return;
+  const payload = JSON.stringify({ v: 1, game: gameSlug(), chars });
+  const hash = hashOf(payload);
+  let last: string | null = null;
+  try {
+    last = localStorage.getItem(PVP_POINTS_KEY);
+  } catch {
+    last = null;
+  }
+  if (last === hash) return;
+  const remember = () => {
+    try {
+      localStorage.setItem(PVP_POINTS_KEY, hash);
+    } catch {
+      // a lost hash only costs one extra send
+    }
+  };
+  try {
+    const res = await signed('upload_pvp_points', { body: payload });
+    if (res.status === 200) {
+      const parsed = JSON.parse(res.body) as {
+        characters?: number;
+        added?: number;
+        deferred?: number;
+        refused?: number;
+      };
+      log(
+        `rank points: ${parsed.added ?? 0} new reading(s) for ${parsed.characters ?? 0} character(s)`,
+        'ok',
+      );
+      if (parsed.refused) {
+        log(
+          `rank points: ${parsed.refused} character(s) already carry another account's Rank Points on ahledger.com; theirs stay until that account stops sending for two weeks`,
+        );
+      }
+      // Readings the server could not take today go again on a later sync.
+      if (parsed.deferred) {
+        log(`rank points: ${parsed.deferred} reading(s) held back for now; sent again later`);
+      } else {
+        remember();
+      }
+    } else if (res.status === 400) {
+      log(`rank points refused: ${errorText(res.body)}`, 'err');
+      remember();
+    } else if (res.status !== 404) {
+      log(`rank points not sent (HTTP ${res.status}): ${errorText(res.body)}; will retry`, 'err');
+    }
+  } catch (err) {
+    log(`rank points not sent: ${String(err)}`, 'err');
+  }
+}
+
 /** Hash of the last sightings table sent, so an unchanged table is not sent again. */
 const SIGHTINGS_KEY = 'ahl.sightings';
 
@@ -531,7 +634,7 @@ async function uploadSightings(text: string, region: string): Promise<void> {
   }
   if (last === hash) return;
   try {
-    const res = await invoke<UploadResult>('upload_sightings', { body: payload });
+    const res = await signed('upload_sightings', { body: payload });
     if (res.status === 200) {
       const parsed = JSON.parse(res.body) as { added?: number };
       log(
@@ -584,7 +687,7 @@ async function uploadLedger(text: string): Promise<void> {
   }
   if (last === hash) return;
   try {
-    const res = await invoke<UploadResult>('upload_ledger', { body: payload });
+    const res = await signed('upload_ledger', { body: payload });
     if (res.status === 200) {
       const parsed = JSON.parse(res.body) as { linked?: boolean; stored?: number };
       if (parsed.linked === false) {
@@ -655,7 +758,7 @@ async function uploadObservations(text: string, addon: string, build?: string): 
     ...(locale ? { locale } : {}),
   };
   try {
-    const res = await invoke<UploadResult>('upload_observations', { body: JSON.stringify(body) });
+    const res = await signed('upload_observations', { body: JSON.stringify(body) });
     if (res.status === 202) {
       const parsed = JSON.parse(res.body) as { records?: number; dropped?: number };
       log(
@@ -681,6 +784,42 @@ async function uploadObservations(text: string, addon: string, build?: string): 
   } catch (err) {
     log(`item sources not sent: ${String(err)}`, 'err');
   }
+}
+
+/**
+ * An addon switch from the saved file; true when the file does not say (an addon from before
+ * the switch existed sends nothing it would govern anyway).
+ */
+function addonSettingOn(luaText: string, key: string): boolean {
+  try {
+    const root = parseLuaSavedVariables(luaText);
+    const db = root['AHledgerDB'];
+    if (!db || typeof db !== 'object' || Array.isArray(db)) return true;
+    const settings = (db as Record<string, unknown>)['settings'];
+    if (!settings || typeof settings !== 'object' || Array.isArray(settings)) return true;
+    return (settings as Record<string, unknown>)[key] !== false;
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * The region the saved file last played on: the newest of its scans and its Rank Points
+ * readings, so a player who moved region and has not scanned yet still gets the right PvP table.
+ */
+function playedRegion(text: string): 'us' | 'eu' | null {
+  let best: { at: number; region: string } | null = null;
+  for (const s of scansFromSavedVariables(text)) {
+    if (!best || s.ts > best.at) best = { at: s.ts, region: s.region };
+  }
+  try {
+    for (const c of pvpPointsFromSavedVariables(text)) {
+      for (const r of c.log) if (!best || r.t > best.at) best = { at: r.t, region: c.region };
+    }
+  } catch {
+    // no readings: the scans decide
+  }
+  return best?.region === 'us' || best?.region === 'eu' ? best.region : null;
 }
 
 function contributionOn(luaText: string): boolean {
@@ -710,7 +849,14 @@ function forgetMarksIfIdentityChanged(): void {
   const identity = `${settings.keyId}|${settings.savedVariablesPath}`;
   try {
     if (localStorage.getItem(IDENTITY_KEY) === identity) return;
-    for (const k of [UPLOADED_KEY, OBSERVATIONS_KEY, LEDGER_KEY, SIGHTINGS_KEY, WATCH_SINCE_KEY]) {
+    for (const k of [
+      UPLOADED_KEY,
+      OBSERVATIONS_KEY,
+      LEDGER_KEY,
+      SIGHTINGS_KEY,
+      PVP_POINTS_KEY,
+      WATCH_SINCE_KEY,
+    ]) {
       localStorage.removeItem(k);
     }
     localStorage.setItem(IDENTITY_KEY, identity);
@@ -803,14 +949,17 @@ async function refreshTables(reason: string): Promise<RefreshResult | null> {
     // back in the data file. A file that cannot be read sends nothing.
     forgetMarksIfIdentityChanged();
     let watch: string | null = null;
+    // The PvP table follows the region the saved file plays on; the setting stands in.
+    let region: string = settings.region;
     try {
       const text = await invoke<string>('read_scan_file', { path: settings.savedVariablesPath });
       const payload = watchPayloadFrom(text, watchSince());
       if (payload) watch = JSON.stringify({ ...payload, game: gameSlug() });
+      region = playedRegion(text) ?? region;
     } catch {
       watch = null;
     }
-    const res = await invoke<RefreshResult>('refresh_price_tables', { watch });
+    const res = await invoke<RefreshResult>('refresh_price_tables', { watch, region });
     if (res.watch?.linked) {
       try {
         // The mark is the saved file the server has now processed: a change stamped in game
@@ -831,6 +980,15 @@ async function refreshTables(reason: string): Promise<RefreshResult | null> {
       `price tables updated: ${res.items.toLocaleString()} prices, ${res.markets} market(s)`,
       'ok',
     );
+    if (res.pvp) {
+      log(`PvP table: ${res.pvp.toLocaleString()} ${region.toUpperCase()} players for the tooltip`);
+    }
+    if (res.pvpError) {
+      log(
+        `PvP table not refreshed (${res.pvpError})${res.pvp ? '; the last one is kept' : ''}`,
+        res.pvp ? '' : 'err',
+      );
+    }
     if (res.contribution) {
       const c = res.contribution;
       log(
@@ -1015,7 +1173,7 @@ el<HTMLButtonElement>('testKey').addEventListener('click', async () => {
     return;
   }
   try {
-    const res = await invoke<UploadResult>('check_key');
+    const res = await signed('check_key');
     if (res.status === 200) {
       const parsed = JSON.parse(res.body) as { label?: string | null; skewSeconds?: number };
       const skew = Math.abs(parsed.skewSeconds ?? 0);

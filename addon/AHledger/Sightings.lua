@@ -58,7 +58,7 @@ function NS.NoteSighting(name, faction, class, level, ruleset, now)
   name = NS.ObserveClear and NS.ObserveClear(name) or name
   if type(name) ~= "string" then return false end
   name = name:gsub("^%s+", ""):gsub("%s+$", "")
-  if #name < 2 or #name > 90 or name:find("[|%c]") then return false end
+  if #name < 2 or #name > 90 or name:find("[%z\1-\31\127|]") then return false end
   now = now or NS.Now()
   if (lastAt[name] or 0) > now - SAME_NAME_S then return false end
   lastAt[name] = now
@@ -83,13 +83,23 @@ function NS.SightingCount()
   return count(table_())
 end
 
+-- The class in English from the client's token where Pvp.lua has loaded (0.13.0), else as shown.
+local function classOf(token, localized)
+  if NS.ClassEnglish then return NS.ClassEnglish(token, localized) end
+  return localized
+end
+
 local function unitSighting(unit)
   if not on() or not UnitIsPlayer or not UnitIsPlayer(unit) then return end
   if UnitIsUnit and UnitIsUnit(unit, "player") then return end
   local name, realm = UnitName(unit)
   if name and realm and realm ~= "" then name = name .. "-" .. realm end
   local faction = UnitFactionGroup and UnitFactionGroup(unit) or nil
-  local class = UnitClass and select(1, UnitClass(unit)) or nil
+  local class = nil
+  if UnitClass then
+    local localized, token = UnitClass(unit)
+    class = classOf(token, localized)
+  end
   local level = UnitLevel and UnitLevel(unit) or nil
   local ruleset = NS.RulesetFromRealm and NS.RulesetFromRealm(GetRealmName and GetRealmName() or "") or nil
   NS.NoteSighting(name, faction, class, level and level > 0 and level or nil, ruleset)
@@ -116,7 +126,8 @@ local function scoreboardSightings()
   local ruleset = NS.RulesetFromRealm and NS.RulesetFromRealm(GetRealmName and GetRealmName() or "") or nil
   for i = 1, GetNumBattlefieldScores() or 0 do
     -- name, killing blows, honorable kills, deaths, honor, faction, race, class, class token.
-    local ok, name, _, _, _, _, faction, _, class = pcall(GetBattlefieldScore, i)
+    local ok, name, _, _, _, _, faction, _, localized, token = pcall(GetBattlefieldScore, i)
+    local class = ok and classOf(token, localized) or nil
     if ok and name then
       -- The scoreboard's faction is 0 for Horde and 1 for Alliance.
       local f = faction == 1 and "Alliance" or (faction == 0 and "Horde") or nil
@@ -131,8 +142,8 @@ local function guildSightings()
   local ruleset = NS.RulesetFromRealm and NS.RulesetFromRealm(GetRealmName and GetRealmName() or "") or nil
   local n = GetNumGuildMembers() or 0
   for i = 1, math.min(n, 1000) do
-    local ok, name, _, _, level, class = pcall(GetGuildRosterInfo, i)
-    if ok and name then NS.NoteSighting(name, faction, class, level, ruleset) end
+    local ok, name, _, _, level, localized, _, _, _, _, token = pcall(GetGuildRosterInfo, i)
+    if ok and name then NS.NoteSighting(name, faction, classOf(token, localized), level, ruleset) end
   end
 end
 
@@ -143,7 +154,7 @@ local function whoSightings()
   for i = 1, C_FriendList.GetNumWhoResults() or 0 do
     local ok, info = pcall(C_FriendList.GetWhoInfo, i)
     if ok and type(info) == "table" and info.fullName then
-      NS.NoteSighting(info.fullName, faction, info.classStr, info.level, ruleset)
+      NS.NoteSighting(info.fullName, faction, classOf(info.filename, info.classStr), info.level, ruleset)
     end
   end
 end

@@ -45,6 +45,8 @@ local OPTIONS = {
   { key = "ledger", short = "Ledger: posts, sales and purchases", label = "Keep a ledger of what you post, sell and buy", tip = "Noted as you post and as you take the auction house mail: the item, the quantity, the money, the house cut. The Ledger tab sums it per item for the last N days. Nothing is taken or posted by the addon." },
   { key = "undercutCheck", short = "Auction house: say when your auctions are undercut", label = "Auction house: say when your auctions are undercut", tip = "When your auctions list loads, each listing is set against the lowest price for that item in your latest scan. One line names the undercut ones, once per visit; the Ledger tab lists them, and a right-click there cancels one." },
   { key = "sightings", short = "Contribute players seen (PvP ladder)", label = "Contribute the players you see, for the PvP ladder", tip = "Notes the name, faction, class and level of every player the client shows you (your target, mouseovers, nameplates, your group, battleground scoreboards, your guild roster, /who). AHledger sync sends the names, and ahledger.com reads each one's kills and rank from Blizzard's own character profiles for the PvP ladder. Names and what anyone nearby can see, nothing about you. Needs Contribute scans on." },
+  { key = "pvpPoints", short = "Contribute your Rank Points (PvP)", label = "Contribute your own Rank Points, for your PvP progress on ahledger.com", tip = "Notes your character's Rank Points, rank and Honor at login, when they change, and when a battleground starts and ends (and whether your side won). AHledger sync sends them, and your character's public page on ahledger.com shows how far the next rank is; across many players the site works out what a win or a loss is worth. Your own numbers only. Turning it off deletes what was noted. Needs Contribute scans on." },
+  { key = "tooltipPvp", short = "Tooltip: PvP rank and kills on players", label = "Tooltip: show a player's PvP rank and kills", tip = "Mouse over a player and the tooltip shows their honor rank and honorable kills from the PvP ladder, which AHledger sync downloads for your region. Players the ladder has not read yet show nothing." },
   { key = "watchSync", short = "Watchlist in step with your account", label = "Keep the watchlist in step with your account on ahledger.com", tip = "AHledger sync sends items you watch here to your account and brings back the ones you watch on the site, so both lists are the same. Alert prices stay where they were set. Needs sync paired with your account." },
   { key = "questRewards", short = "Quest rewards: mark the best value", label = "Quest rewards: mark the best value", tip = "When a quest offers a choice, each option shows its worth (median or vendor, whichever is more) and the best one is marked." },
   { key = "mailSummary", short = "Mailbox: auction summary in chat", label = "Mailbox: one line on what the auction house sent", tip = "On opening the mailbox: how many sold and for how much, how many expired, outbid, won or cancelled. Nothing is opened or taken." },
@@ -152,6 +154,7 @@ function NS.OnSettingChanged(key)
   if key == "vendorFlips" and NS.RefreshVendorFlips then NS.RefreshVendorFlips() end
   if key == "questRewards" and NS.RefreshQuestRewards then NS.RefreshQuestRewards() end
   if key == "bagDots" and NS.RefreshBagDots then NS.RefreshBagDots() end
+  if NS.PvpSettingChanged then NS.PvpSettingChanged(key) end
   if key ~= "minimapAngle" and key ~= "barX" and key ~= "barY" and NS.RefreshWindow then NS.RefreshWindow() end
 end
 
@@ -293,6 +296,11 @@ function NS.OnLogin()
   if not db.intro0120 then
     db.intro0120 = true
     NS.Print("0.12.0: the names of players you see (target, mouseover, scoreboards, guild, /who) now seed the PvP ladder on ahledger.com, which reads kills and ranks from Blizzard's own character profiles. Names only; /ahl set sightings off turns it off.")
+  end
+  -- Once, after updating to 0.13.0: PvP ranks on tooltips, and your own Rank Points.
+  if not db.intro0130 and NS.IsForeverClient and NS.IsForeverClient() then
+    db.intro0130 = true
+    NS.Print("0.13.0: mouse over a player to see their PvP rank and kills from the ladder (AHledger sync downloads it for your region), and with Contribute on, your own Rank Points go to your character page on ahledger.com to show how far the next rank is. Both are switches in /ahl options; turning Rank Points off deletes what was noted.")
   end
   -- Once, in the two weeks after launch (Site.lua; off with siteLinks).
   local launch = NS.LaunchNudge and NS.LaunchNudge(db, time and time() or nil)

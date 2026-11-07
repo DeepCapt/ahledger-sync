@@ -17,7 +17,7 @@
 ]]
 
 local ADDON_NAME, NS = ...
-NS.VERSION = "0.12.1"
+NS.VERSION = "0.13.0"
 
 local MAX_SCANS_PER_MARKET = 3 -- newest scans kept per realm+faction (about 1 MB each at 50k listings)
 local MAX_SCANS_TOTAL = 12 -- hard ceiling on the SavedVariables file across every realm and faction
@@ -127,6 +127,9 @@ local DEFAULTS = {
   ledgerDays = 7,
   -- 0.12.0: the players you see, by name, for the PvP ladder on ahledger.com.
   sightings = true,
+  -- 0.13.0: a player's PvP rank and kills on their tooltip, and your own Rank Points for the site.
+  tooltipPvp = true,
+  pvpPoints = true,
 }
 -- Settings written while something is dragged: not worth a "last change" note each frame.
 local SILENT = { minimapAngle = true, barX = true, barY = true }

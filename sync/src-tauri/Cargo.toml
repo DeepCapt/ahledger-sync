@@ -1,6 +1,6 @@
 [package]
 name = "ahledger-sync"
-version = "0.2.26"
+version = "0.2.27"
 description = "AHledger sync: uploads addon auction house scans to ahledger.com"
 authors = ["AHledger"]
 license = "MIT"

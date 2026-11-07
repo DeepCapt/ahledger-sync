@@ -8,7 +8,10 @@ use std::{
     fs,
     io::Write,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{
+        atomic::{AtomicI64, Ordering},
+        Mutex,
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -61,6 +64,32 @@ pub struct UploadResult {
     /// The unix time the request was signed with, so the webview can compare it with the
     /// server's clock in a 401 and name a clock problem exactly.
     pub sent_ts: u64,
+    /// Seconds added to this computer's clock to sign requests (0.2.27): the server's clock less
+    /// this one's, learned from a refusal. Zero while the clock is right.
+    pub clock_offset: i64,
+}
+
+/// The correction learned from the server's clock (0.2.27). A computer whose clock is off by more
+/// than the server's five-minute window (often a wrong time zone with the time set by hand to
+/// look right, which leaves the real time hours out) had every upload refused. Requests are now
+/// signed with this added, and a refusal for the clock sets it from the time the server sends
+/// back and tries once more. The server still checks the time window and the nonce, so a
+/// captured request cannot be replayed any later than before.
+static CLOCK_OFFSET: AtomicI64 = AtomicI64::new(0);
+
+/// The correction a response asks for: on a 401 for the clock window whose body carries the
+/// server's clock, that clock less the unix time this computer read when signing. Pure.
+fn clock_correction(status: u16, body: &str, local_ts: i64) -> Option<i64> {
+    if status != 401 || !body.contains("clock window") {
+        return None;
+    }
+    let parsed: serde_json::Value = serde_json::from_str(body).ok()?;
+    let server_ts = parsed.get("serverTs")?.as_i64()?;
+    // A server answer outside 2020..2100 is not a clock to follow.
+    if !(1_577_836_800..=4_102_444_800).contains(&server_ts) {
+        return None;
+    }
+    Some(server_ts - local_ts)
 }
 
 #[derive(Default)]
@@ -342,16 +371,7 @@ async fn signed_post(
         body.into_bytes()
     };
 
-    let sent_ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(err)?
-        .as_secs();
-    let ts = sent_ts.to_string();
-    let nonce_bytes: [u8; 16] = rand::random();
-    let nonce = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(nonce_bytes);
     let hash = hex::encode(Sha256::digest(&bytes));
-    let signature = sign(&settings.secret, &ts, &nonce, &hash)?;
-
     let client = reqwest::Client::builder()
         .user_agent(format!("AHledger-sync/{}", env!("CARGO_PKG_VERSION")))
         .timeout(Duration::from_secs(90))
@@ -361,20 +381,49 @@ async fn signed_post(
         return Err("refusing to upload over a non-https API address".to_string());
     }
     let url = format!("{}{}", settings.api_url.trim_end_matches('/'), path);
-    let mut req = client
-        .post(url)
-        .header("content-type", "application/json")
-        .header("x-ahl-key", settings.key_id)
-        .header("x-ahl-ts", ts)
-        .header("x-ahl-nonce", nonce)
-        .header("x-ahl-signature", signature);
-    if gzip_body {
-        req = req.header("content-encoding", "gzip");
+    // At most two tries: the second only when the first was refused for the clock and taught a
+    // new correction.
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        let local_ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(err)?
+            .as_secs() as i64;
+        let offset = CLOCK_OFFSET.load(Ordering::Relaxed);
+        let sent_ts = (local_ts + offset).max(0) as u64;
+        let ts = sent_ts.to_string();
+        let nonce_bytes: [u8; 16] = rand::random();
+        let nonce = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(nonce_bytes);
+        let signature = sign(&settings.secret, &ts, &nonce, &hash)?;
+        let mut req = client
+            .post(&url)
+            .header("content-type", "application/json")
+            .header("x-ahl-key", &settings.key_id)
+            .header("x-ahl-ts", ts)
+            .header("x-ahl-nonce", nonce)
+            .header("x-ahl-signature", signature);
+        if gzip_body {
+            req = req.header("content-encoding", "gzip");
+        }
+        let res = req.body(bytes.clone()).send().await.map_err(err)?;
+        let status = res.status().as_u16();
+        let body = res.text().await.unwrap_or_default();
+        if attempt == 1 {
+            if let Some(next) = clock_correction(status, &body, local_ts) {
+                if next != offset {
+                    CLOCK_OFFSET.store(next, Ordering::Relaxed);
+                    continue;
+                }
+            }
+        }
+        return Ok(UploadResult {
+            status,
+            body,
+            sent_ts,
+            clock_offset: CLOCK_OFFSET.load(Ordering::Relaxed),
+        });
     }
-    let res = req.body(bytes).send().await.map_err(err)?;
-    let status = res.status().as_u16();
-    let body = res.text().await.unwrap_or_default();
-    Ok(UploadResult { status, body, sent_ts })
 }
 
 /// Gzip, sign, and POST one scan (the JSON produced by the webview) to `/v1/upload`.
@@ -735,6 +784,13 @@ async fn upload_ledger(app: AppHandle, body: String) -> Result<UploadResult, Str
     signed_post(&app, "/v1/upload/ledger", body, true).await
 }
 
+/// Gzip, sign, and POST the Rank Points the addon read on the player's own characters to
+/// `/v1/upload/pvp-points` (0.2.27).
+#[tauri::command]
+async fn upload_pvp_points(app: AppHandle, body: String) -> Result<UploadResult, String> {
+    signed_post(&app, "/v1/upload/pvp-points", body, true).await
+}
+
 /// Gzip, sign, and POST the players the addon saw to `/v1/upload/sightings` (0.2.25).
 #[tauri::command]
 async fn upload_sightings(app: AppHandle, body: String) -> Result<UploadResult, String> {
@@ -799,6 +855,12 @@ pub struct RefreshResult {
     pub contribution: Option<Contribution>,
     /// The account watchlist written for the addon, when the server answered.
     pub watch: Option<WatchSummary>,
+    /// Characters in the PvP table written for the tooltip, when the server had one.
+    pub pvp: Option<usize>,
+    /// Why the PvP table could not be refreshed this time, when it could not (0.2.27). The last
+    /// good table is written instead while there is one.
+    #[serde(rename = "pvpError")]
+    pub pvp_error: Option<String>,
 }
 
 /// The counts `/v1/upload/stats` answers with: nothing about which items or realms.
@@ -930,6 +992,7 @@ async fn fetch_contribution(app: &AppHandle) -> Option<Contribution> {
 async fn refresh_price_tables(
     app: AppHandle,
     watch: Option<String>,
+    region: Option<String>,
 ) -> Result<RefreshResult, String> {
     let settings = load_settings(&app)?;
     if settings.saved_variables_path.is_empty() {
@@ -982,6 +1045,21 @@ async fn refresh_price_tables(
             newest = newest.max(updated);
         }
     }
+    // The PvP ladder for the tooltip (0.2.27), for the region the saved file plays on. A server
+    // without it, or a table that fails the checks, leaves the block out; prices still go.
+    let pvp_region = region
+        .filter(|r| r == "us" || r == "eu")
+        .unwrap_or_else(|| settings.region.clone());
+    let mut pvp_rows = None;
+    let mut pvp_error = None;
+    if settings.game == "forever" && (pvp_region == "us" || pvp_region == "eu") {
+        let (table, problem) = fetch_pvp_table(&app, &client, &base, &pvp_region).await;
+        if let Some((lua, rows)) = table {
+            out.push_str(&lua);
+            pvp_rows = Some(rows);
+        }
+        pvp_error = problem;
+    }
     let contribution = fetch_contribution(&app).await;
     if let Some(c) = contribution.as_ref() {
         out.push_str(&render_contribution(c));
@@ -1009,7 +1087,144 @@ async fn refresh_price_tables(
             saved_at: a.saved_at,
             items: a.items.len(),
         }),
+        pvp: pvp_rows,
+        pvp_error,
     })
+}
+
+/// The PvP table for a region, as the Lua block and its row count, with why it could not be
+/// refreshed when it could not (0.2.27). The last good table is kept in the app's data folder
+/// with its ETag: the server answers 304 when nothing changed, so a refresh costs a few bytes,
+/// and a failed download or a table that fails the checks writes the last good one instead of
+/// dropping the tooltip. The body is asked for gzipped and inflated here.
+async fn fetch_pvp_table(
+    app: &AppHandle,
+    client: &reqwest::Client,
+    base: &str,
+    region: &str,
+) -> (Option<(String, usize)>, Option<String>) {
+    let dir = app.path().app_data_dir().ok();
+    let text_path = dir.as_ref().map(|d| d.join(format!("pvptable-{region}.txt")));
+    let etag_path = dir.as_ref().map(|d| d.join(format!("pvptable-{region}.etag")));
+    let cached = text_path.as_ref().and_then(|p| fs::read_to_string(p).ok());
+    let etag = etag_path.as_ref().and_then(|p| fs::read_to_string(p).ok());
+    let from_cache = |problem: String| match cached.as_deref().map(|t| render_pvp_table(region, t)) {
+        Some(Ok(Some(block))) => (Some(block), Some(problem)),
+        _ => (None, Some(problem)),
+    };
+    let mut req = client
+        .get(format!("{base}/v1/pvptable/{region}"))
+        .header("accept-encoding", "gzip");
+    if let (Some(tag), Some(_)) = (etag.as_deref(), cached.as_ref()) {
+        req = req.header("if-none-match", tag.trim());
+    }
+    let res = match req.send().await {
+        Ok(r) => r,
+        Err(e) => return from_cache(format!("download failed: {e}")),
+    };
+    let status = res.status().as_u16();
+    if status == 304 {
+        return match cached.as_deref().map(|t| render_pvp_table(region, t)) {
+            Some(Ok(Some(block))) => (Some(block), None),
+            _ => (None, Some("the kept table no longer reads".to_string())),
+        };
+    }
+    if !(200..300).contains(&status) {
+        return from_cache(format!("HTTP {status}"));
+    }
+    let new_tag = res
+        .headers()
+        .get("etag")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let gzipped = res
+        .headers()
+        .get("content-encoding")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.eq_ignore_ascii_case("gzip"));
+    let bytes = match res.bytes().await {
+        Ok(b) => b,
+        Err(e) => return from_cache(format!("download failed: {e}")),
+    };
+    let text = if gzipped {
+        use std::io::Read;
+        let mut out = String::new();
+        let mut dec = flate2::read::GzDecoder::new(&bytes[..]).take(MAX_TABLE_BYTES as u64 + 1);
+        if dec.read_to_string(&mut out).is_err() {
+            return from_cache("the table did not inflate".to_string());
+        }
+        out
+    } else {
+        match String::from_utf8(bytes.to_vec()) {
+            Ok(t) => t,
+            Err(_) => return from_cache("the table is not text".to_string()),
+        }
+    };
+    match render_pvp_table(region, &text) {
+        Ok(Some(block)) => {
+            if let (Some(d), Some(tp)) = (dir.as_ref(), text_path.as_ref()) {
+                let _ = fs::create_dir_all(d);
+                if fs::write(tp, &text).is_ok() {
+                    if let (Some(ep), Some(tag)) = (etag_path.as_ref(), new_tag.as_ref()) {
+                        let _ = fs::write(ep, tag);
+                    }
+                }
+            }
+            (Some(block), None)
+        }
+        Ok(None) => (None, None),
+        Err(e) => from_cache(e),
+    }
+}
+
+/// Validates the PvP table and renders the Lua block the tooltip reads
+/// (`AHledgerData.pvp = { region, updated, count, text }`, rows joined by ";"). Like the price
+/// tables, every byte is checked because the game runs this file: the region must be the one
+/// asked for, a name is letters (any script) with one space, the rank and kills are digits.
+/// Returns `None` for an empty table, and an error for anything that fails, which drops the
+/// block without touching the prices.
+fn render_pvp_table(region: &str, text: &str) -> Result<Option<(String, usize)>, String> {
+    let mut lines = text.lines();
+    let Some(header) = lines.next() else { return Ok(None) };
+    let parts: Vec<&str> = header.split('|').collect();
+    if parts.len() < 4 || parts[0] != "AHP1" || parts[1] != region {
+        return Err("unexpected PvP table header".to_string());
+    }
+    let updated: u64 = parts[2].parse().map_err(|_| "PvP table has a bad timestamp".to_string())?;
+    if text.len() > MAX_TABLE_BYTES {
+        return Err("PvP table is too large".to_string());
+    }
+    let digits = |s: &str, max: usize| !s.is_empty() && s.len() <= max && s.bytes().all(|b| b.is_ascii_digit());
+    let mut rows: Vec<&str> = Vec::new();
+    for line in lines.filter(|l| !l.is_empty()) {
+        let fields: Vec<&str> = line.split(':').collect();
+        let ok = fields.len() == 3
+            && digits(fields[1], 2)
+            && digits(fields[2], 9)
+            && {
+                let names: Vec<&str> = fields[0].split(' ').collect();
+                names.len() == 2
+                    && names.iter().all(|n| {
+                        let count = n.chars().count();
+                        (2..=20).contains(&count) && n.chars().all(char::is_alphabetic)
+                    })
+            };
+        // A row that fails is left out, never written: one odd name must not cost the table.
+        if ok {
+            rows.push(line);
+        }
+    }
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    let lua = format!(
+        "AHledgerData.pvp = {{ region = \"{}\", updated = {}, count = {}, text = [==[\n;{};\n]==] }}\n",
+        region,
+        updated,
+        rows.len(),
+        rows.join(";")
+    );
+    Ok(Some((lua, rows.len())))
 }
 
 /// Validates one market's price table and renders the Lua block the addon reads. Returns
@@ -1077,6 +1292,7 @@ pub fn run() {
             upload_observations,
             upload_ledger,
             upload_sightings,
+            upload_pvp_points,
             check_for_update,
             open_site_url,
             price_table_path,
@@ -1091,6 +1307,29 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_clock_refusal_teaches_the_correction() {
+        use super::clock_correction;
+        let body = r#"{"error":"x-ahl-ts is outside the accepted clock window","serverTime":"2026-11-07T18:13:52.000Z","serverTs":1794161632}"#;
+        // This computer read a time eight hours ahead of the server's.
+        assert_eq!(
+            clock_correction(401, body, 1794161632 + 8 * 3600),
+            Some(-8 * 3600)
+        );
+        assert_eq!(clock_correction(401, body, 1794161632 - 420), Some(420));
+        // Any other refusal, status, or a body without a believable clock teaches nothing.
+        assert_eq!(clock_correction(200, body, 0), None);
+        assert_eq!(
+            clock_correction(401, r#"{"error":"bad signature","serverTs":1794161632}"#, 0),
+            None
+        );
+        assert_eq!(
+            clock_correction(401, r#"{"error":"clock window","serverTs":12}"#, 0),
+            None
+        );
+        assert_eq!(clock_correction(401, "clock window", 0), None);
+    }
+
     #[test]
     fn a_stored_secret_stays_with_its_key() {
         use super::{keep_stored_secret, Settings};
@@ -1149,7 +1388,8 @@ mod tests {
     }
 
     use super::{
-        data_file_for, is_newer, render_contribution, render_price_table, render_watch, sign,
+        data_file_for, is_newer, render_contribution, render_price_table, render_pvp_table, render_watch,
+        sign,
         Contribution, WatchAnswer, WatchItem,
     };
     use std::fs;
@@ -1249,6 +1489,52 @@ mod tests {
         assert!(render_price_table("forever.pvp.horde.us", "AHL2|forever/pvp/horde/us|1|1\n1:2\n").is_err());
         // An empty body is skipped, not an error.
         assert!(render_price_table("forever.pvp.horde.us", "").unwrap().is_none());
+    }
+
+    #[test]
+    fn pvp_table_renders_letters_and_digits_only() {
+        let text = "AHP1|us|1794074400|2\nAlla Jin:5:1234\nPacalkirály Rezsibiztos:0:7\n";
+        let (lua, rows) = render_pvp_table("us", text).unwrap().unwrap();
+        assert_eq!(rows, 2);
+        assert_eq!(
+            lua,
+            "AHledgerData.pvp = { region = \"us\", updated = 1794074400, count = 2, text = [==[\n;Alla Jin:5:1234;Pacalkirály Rezsibiztos:0:7;\n]==] }\n"
+        );
+        assert!(render_pvp_table("us", "AHP1|us|1|0\n").unwrap().is_none());
+    }
+
+    #[test]
+    fn pvp_table_rejects_anything_that_could_escape_the_lua_string() {
+        for bad in [
+            "AHP1|us|1|1\nAlla]==] Jin:5:1\n",
+            "AHP1|us|1|1\nAlla Jin:5:1:9\n",
+            "AHP1|us|1|1\nAlla  Jin:5:1\n",
+            "AHP1|us|1|1\nAlla Jin\"):5:1\n",
+            "AHP1|us|1|1\nAlla Jin:x:1\n",
+            "AHP1|us|1|1\nAlla Jin Third:5:1\n",
+            "AHP1|us|1|1\nA Jin:5:1\n",
+        ] {
+            // The bad row is left out; with no other rows there is no table.
+            assert!(render_pvp_table("us", bad).unwrap().is_none(), "{bad}");
+            let with_good = format!("{bad}Bo Ko:1:2\n");
+            let (lua, rows) = render_pvp_table("us", &with_good).unwrap().unwrap();
+            assert_eq!(rows, 1, "{bad}");
+            assert!(lua.contains("[==[\n;Bo Ko:1:2;\n]==]"), "{lua}");
+        }
+        // Carriage returns, an empty name part, kills past nine digits: left out too.
+        for bad in [
+            "AHP1|us|1|1\nAlla Jin:5:1\r\rx\n",
+            "AHP1|us|1|1\nAlla :5:1\n",
+            "AHP1|us|1|1\nAlla Jin:5:1000000000\n",
+        ] {
+            assert!(render_pvp_table("us", bad).unwrap().is_none(), "{bad}");
+        }
+        assert!(render_pvp_table("us", "AHP1|us|soon|1\nAlla Jin:5:1\n").is_err());
+        // Past the size ceiling: refused whole.
+        let huge = format!("AHP1|us|1|1\n{}", "Alla Jin:5:1\n".repeat(super::MAX_TABLE_BYTES / 10));
+        assert!(render_pvp_table("us", &huge).is_err());
+        assert!(render_pvp_table("us", "AHP1|eu|1|1\nAlla Jin:5:1\n").is_err());
+        assert!(render_pvp_table("us", "AHL1|us|1|1\nAlla Jin:5:1\n").is_err());
     }
 
     #[test]

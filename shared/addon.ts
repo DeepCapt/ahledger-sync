@@ -538,6 +538,99 @@ export function sightingsFromSavedVariables(src: string): AddonSighting[] {
   return out;
 }
 
+/**
+ * One reading of a character's own Rank Points (addon 0.13.0): the client's raw numbers. Short
+ * keys, as the addon stores them: lv/e/th the hidden "PvP Rank Points" renown (level, points into
+ * it, points it needs), cs its reputation standing, cq/ct/cw the Rank Points currency (held, ever
+ * earned, earned this week), rr the rank currency, h honor, m the battleground map, w 1 for a win.
+ */
+export interface AddonPvpReading {
+  t: number;
+  ev: 'login' | 'change' | 'start' | 'end' | 'after';
+  lv?: number;
+  e?: number;
+  th?: number;
+  cs?: number;
+  cq?: number;
+  ct?: number;
+  cw?: number;
+  rr?: number;
+  h?: number;
+  m?: number;
+  w?: 0 | 1;
+}
+
+/** A character the addon read Rank Points on, with what the client said about it. */
+export interface AddonPvpCharacter {
+  n: string;
+  region: 'us' | 'eu';
+  r?: AddonSighting['r'];
+  f?: 'Alliance' | 'Horde';
+  c?: string;
+  l?: number;
+  log: AddonPvpReading[];
+}
+
+export const PVP_POINTS_MAX_CHARACTERS = 30;
+export const PVP_POINTS_MAX_READINGS = 400;
+const PVP_EVENTS = new Set(['login', 'change', 'start', 'end', 'after']);
+const PVP_NUMBER_KEYS = ['lv', 'e', 'th', 'cs', 'cq', 'ct', 'cw', 'rr', 'h', 'm'] as const;
+
+/**
+ * The addon's Rank Points log (AHledgerDB.pvpPoints, keyed by character name) from a
+ * SavedVariables file, cleaned; empty when absent. Numbers outside what the client can hold
+ * are dropped, never clamped, so a garbled one cannot pass as real.
+ */
+export function pvpPointsFromSavedVariables(src: string): AddonPvpCharacter[] {
+  const root = parseLuaSavedVariables(src);
+  const db = root['AHledgerDB'];
+  if (!db || typeof db !== 'object' || Array.isArray(db)) return [];
+  const table = (db as Record<string, LuaValue>)['pvpPoints'];
+  if (!table || typeof table !== 'object' || Array.isArray(table)) return [];
+  const out: AddonPvpCharacter[] = [];
+  for (const [name, raw] of Object.entries(table as Record<string, LuaValue>)) {
+    const n = name.trim();
+    if (n.length < 2 || n.length > 90 || !raw || typeof raw !== 'object' || Array.isArray(raw))
+      continue;
+    const c = raw as Record<string, LuaValue>;
+    const region = c['region'];
+    if (region !== 'us' && region !== 'eu') continue;
+    const logRaw = c['log'];
+    if (!Array.isArray(logRaw)) continue;
+    const log: AddonPvpReading[] = [];
+    for (const item of logRaw) {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+      const e = item as Record<string, LuaValue>;
+      const t = e['t'];
+      const ev = e['ev'];
+      if (typeof t !== 'number' || !Number.isInteger(t) || t < 1_700_000_000 || t > 4_102_444_800)
+        continue;
+      if (typeof ev !== 'string' || !PVP_EVENTS.has(ev)) continue;
+      const r: AddonPvpReading = { t, ev: ev as AddonPvpReading['ev'] };
+      for (const k of PVP_NUMBER_KEYS) {
+        const v = e[k];
+        if (typeof v === 'number' && Number.isInteger(v) && v >= 0 && v <= 10_000_000) r[k] = v;
+      }
+      if (e['w'] === 0 || e['w'] === 1) r.w = e['w'];
+      log.push(r);
+    }
+    if (log.length === 0) continue;
+    const ch: AddonPvpCharacter = {
+      n: n.slice(0, 90),
+      region,
+      log: log.slice(-PVP_POINTS_MAX_READINGS),
+    };
+    if (typeof c['r'] === 'string' && SIGHTING_RULESET.has(c['r']))
+      ch.r = c['r'] as AddonSighting['r'];
+    if (c['f'] === 'Alliance' || c['f'] === 'Horde') ch.f = c['f'];
+    if (typeof c['c'] === 'string' && c['c'].length <= 20) ch.c = c['c'];
+    if (typeof c['l'] === 'number' && c['l'] >= 1 && c['l'] <= 80) ch.l = Math.floor(c['l']);
+    out.push(ch);
+    if (out.length >= PVP_POINTS_MAX_CHARACTERS) break;
+  }
+  return out;
+}
+
 export function scansFromSavedVariables(src: string): SavedScan[] {
   const root = parseLuaSavedVariables(src);
   const db = root['AHledgerDB'];
