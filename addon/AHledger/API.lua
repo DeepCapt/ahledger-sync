@@ -88,7 +88,8 @@ end
 --- keep or change:
 ---   median, minBuyout, quantity, median7d, median30d, low30d, high30d (copper; nil = unknown),
 ---   soldPerDay (estimated units sold a day; nil without an estimate),
----   market, updated (unix seconds of the table), snapshot (see GetTableInfo), url.
+---   market, updated (unix seconds: the table's newest scan, or the player's own scan while it
+---   prices the market), snapshot (see GetTableInfo), url.
 --- nil when the item has no price there.
 function API.GetPrice(item, market)
   return safe(function()
@@ -96,7 +97,9 @@ function API.GetPrice(item, market)
     if not id then return nil end
     local m = marketOf(market)
     local row, t = NS.Price(id, m)
-    if not row or not t then return nil end
+    if not row then return nil end
+    -- When these numbers were seen: the player's own scan while it prices the market (0.13.1).
+    local seen = NS.PricesSeen and NS.PricesSeen(m) or (t and t.updated)
     return {
       itemID = id,
       median = row.median,
@@ -108,8 +111,8 @@ function API.GetPrice(item, market)
       high30d = row.hi,
       soldPerDay = row.perDay,
       market = m,
-      updated = t.updated,
-      snapshot = t.seed == true,
+      updated = seen,
+      snapshot = (t and t.seed == true and not (NS.OwnScanInUse and NS.OwnScanInUse(m))) or false,
       url = NS.ItemURL(id),
     }
   end)

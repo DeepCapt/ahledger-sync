@@ -2,8 +2,8 @@
   Tooltip lines. Every item tooltip (bags, bank, auction house, chat links, quest rewards,
   crafting windows) gains AHledger lines from the price table for the current market:
 
-    AHledger        12g 34s median  ·  min 11g 20s
-    7d ▲ 4.2%  ·  123 listed  ·  table 35 min old
+    AHledger · PvP Horde (US)          scanned 35 min ago
+    Median 12g 34s   123 listed   lowest 11g 20s
     Vendor 5s 20c  ·  Disenchant ~1g 10s
 
   Uses TooltipDataProcessor where the client has it (Classic Era 1.15+ and Forever), and the
@@ -24,11 +24,18 @@ local function pct(cur, prev)
   return (cur - prev) / prev * 100
 end
 
-local function ageText(seconds)
-  if not seconds then return "" end
-  if seconds < 3600 then return string.format("%d min old", math.floor(seconds / 60)) end
-  if seconds < 86400 then return string.format("%d h old", math.floor(seconds / 3600)) end
-  return string.format("%d d old", math.floor(seconds / 86400))
+-- The header's right side: when the prices were scanned, and by whom when it was the player
+-- (0.13.1: "scanned 2 h ago" read as the age of the house, "2 h old" as something broken).
+local function ageText(ctx)
+  if ctx.ageText then return GREY .. ctx.ageText .. R end
+  local s = ctx.age
+  if not s then return "" end
+  local when
+  if s < 60 then when = "just now"
+  elseif s < 3600 then when = string.format("%d min ago", math.floor(s / 60))
+  elseif s < 86400 then when = string.format("%d h ago", math.floor(s / 3600))
+  else when = string.format("%d d ago", math.floor(s / 86400)) end
+  return GREY .. (ctx.ownScan and "your scan " or "scanned ") .. when .. R
 end
 
 -- The compact block (option tooltipCompact): the market and the numbers on one line, then the
@@ -111,7 +118,7 @@ end
 -- The lines of the block, as {kind, left, right}: kind "double" for the header, "line" for the
 -- rest. Pure, so the harness can read the words. Every optional part keeps its own switch.
 --
---   AHledger · PvP Horde                    2 h old
+--   AHledger · PvP Horde                    scanned 2 h ago
 --   Median 4g   3 listed   lowest 3g 97s
 --   7 days: up 81% from 2g 21s
 --   Steady: ~2 a day, 2 days of stock
@@ -127,7 +134,7 @@ function NS.TooltipBlock(ctx)
   local label = ctx.marketLabel and ("AHledger · " .. ctx.marketLabel) or "AHledger"
   local row = ctx.row
   if row then
-    out[#out + 1] = { "double", "|cffff9d2f" .. label .. "|r", (ctx.ageText and (GREY .. ctx.ageText .. R)) or (ctx.age and (GREY .. ageText(ctx.age) .. R)) or "" }
+    out[#out + 1] = { "double", "|cffff9d2f" .. label .. "|r", ageText(ctx) }
     local price = { string.format("%sMedian %s%s", WHITE, NS.Gold(row.median), R) }
     if ctx.setting("tooltipQuantity") and row.qty and row.qty > 0 then
       price[#price + 1] = string.format("%s%d listed%s", GREY, row.qty, R)
@@ -149,7 +156,7 @@ function NS.TooltipBlock(ctx)
     local pace = ctx.setting("tooltipPace") and NS.Pace(row) or nil
     if pace then out[#out + 1] = { "line", NS.PaceColour(pace.tier) .. NS.PaceText(pace) .. R } end
   elseif ctx.hasTable then
-    out[#out + 1] = { "double", "|cffff9d2f" .. label .. "|r", (ctx.ageText and (GREY .. ctx.ageText .. R)) or (ctx.age and (GREY .. ageText(ctx.age) .. R)) or "" }
+    out[#out + 1] = { "double", "|cffff9d2f" .. label .. "|r", ageText(ctx) }
     out[#out + 1] = { "line", GREY .. "Not listed on " .. (ctx.marketLabel or "this market") .. R }
   else
     out[#out + 1] = { "double", "|cffff9d2fAHledger|r", GREY .. "no price table (/ahl import)" .. R }
@@ -187,6 +194,8 @@ local function addLines(tooltip, itemID, link)
 
   local market = NS.Market()
   local row, t = NS.Price(itemID, market)
+  -- Lowest, median and listed from the player's own scan, newer than the table (0.13.1).
+  local own = NS.OwnScanInUse and NS.OwnScanInUse(market) or false
   local vendor = select(11, GetItemInfo(link or itemID))
   local de = (NS.Setting("tooltipDisenchant") and NS.DisenchantValue) and NS.DisenchantValue(link or itemID, market) or nil
   local owned = (NS.Setting("tooltipBags") and NS.BagLine) and NS.BagLine(itemID, row) or nil
@@ -197,11 +206,12 @@ local function addLines(tooltip, itemID, link)
 
   tooltip:AddLine(" ")
   for _, l in ipairs(NS.TooltipBlock({
-    row = row, hasTable = t ~= nil, marketLabel = NS.MarketLabel(market), age = t and NS.TableAge(market) or nil,
+    row = row, hasTable = t ~= nil or own, marketLabel = NS.MarketLabel(market), age = NS.TableAge(market),
+    ownScan = own,
     vendor = vendor, disenchant = de, owned = owned, setting = NS.Setting,
     compact = compact, craft = craft, markets = markets,
     shiftHint = compact and NS.Setting("tooltipShiftMore") and not NS.Setting("tooltipCompact") and true or false,
-    seedDate = (t and t.seed) and NS.TableDate(market) or nil,
+    seedDate = (t and t.seed and not own) and NS.TableDate(market) or nil,
   })) do
     if l[1] == "double" then tooltip:AddDoubleLine(l[2], l[3]) else tooltip:AddLine(l[2]) end
   end

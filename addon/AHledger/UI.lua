@@ -73,6 +73,22 @@ function UI.AgeText(seconds)
   return string.format("%d d old", math.floor(seconds / 86400))
 end
 
+-- "just now", "12 min ago", "2 h ago", "3 d ago": when something happened, for the prices'
+-- age, which reads as a scan's time rather than as something going off.
+function UI.AgoText(seconds)
+  if not seconds then return nil end
+  if seconds < 60 then return "just now" end
+  if seconds < 3600 then return string.format("%d min ago", math.floor(seconds / 60)) end
+  if seconds < 86400 then return string.format("%d h ago", math.floor(seconds / 3600)) end
+  return string.format("%d d ago", math.floor(seconds / 86400))
+end
+
+-- The color for an age: green under an hour, amber under six, red beyond or missing.
+function UI.AgeColor(seconds)
+  if not seconds then return UI.DOWN end
+  return seconds < 3600 and UI.UP or seconds < 6 * 3600 and "|cffffd23f" or UI.DOWN
+end
+
 -- Age colored by freshness: green under an hour, amber under six, red beyond or missing.
 function UI.AgeColored(seconds)
   if not seconds then return UI.DOWN .. "no price table" .. UI.R end

@@ -17,7 +17,7 @@
 ]]
 
 local ADDON_NAME, NS = ...
-NS.VERSION = "0.13.0"
+NS.VERSION = "0.13.2"
 
 local MAX_SCANS_PER_MARKET = 3 -- newest scans kept per realm+faction (about 1 MB each at 50k listings)
 local MAX_SCANS_TOTAL = 12 -- hard ceiling on the SavedVariables file across every realm and faction
@@ -269,6 +269,12 @@ NS.RulesetFromRealm = rulesetFromRealm
 function NS.Market()
   local override = NS.Setting("market")
   if type(override) == "string" and override ~= "" then return override end
+  return NS.ClientMarket()
+end
+
+-- The market of the realm and faction the client is on, whatever the options pin: the one a scan
+-- taken here belongs to.
+function NS.ClientMarket()
   local info = clientInfo()
   local region = info.region ~= "unknown" and info.region or "us"
   -- Each region is its own economy (Forever opens its EU servers with the US ones), so an EU
@@ -473,7 +479,7 @@ function NS.ScanStatusLines(tt, state)
   end
   local last = state.last
   if last then
-    tt:AddLine(string.format("Last scan: %s listings, %s", comma(last.count or 0), (NS.UI and NS.UI.AgeText(now() - (last.ts or now()))) or ""), 1, 1, 1)
+    tt:AddLine(string.format("Last scan: %s listings, %s", comma(last.count or 0), (NS.UI and NS.UI.AgoText(now() - (last.ts or now()))) or ""), 1, 1, 1)
     if state.unsent then
       if ensureDb().settings.contribute then
         tt:AddLine("Not sent yet: type /reload so AHledger sync can upload it.", 1, 0.82, 0.2, true)
@@ -710,14 +716,18 @@ finishScan = function()
   refusedAt = nil
   endScan()
   if NS.PersistSave then NS.PersistSave(true) end
+  -- Tooltips take their lowest prices and listed counts from this scan as soon as it is read
+  -- (0.13.1), without waiting for the reload that sends it and the table built from it.
+  local used = NS.UseOwnScan and NS.UseOwnScan(scan) or false
   local tail = " Contribution is off; it stays on this machine."
   if db.settings.contribute then
     tail = db.settings.reloadPrompt
       and " Type /reload (or press Save and upload) so sync can send it."
       or " Type /reload so AHledger sync can upload it."
   end
-  print_(string.format("scan saved: %s listings on %s (%s)%s.%s",
-    comma(n), info.realm, info.faction, skipped > 0 and string.format(", %d without item ids skipped", skipped) or "", tail))
+  print_(string.format("scan saved: %s listings on %s (%s)%s.%s%s",
+    comma(n), info.realm, info.faction, skipped > 0 and string.format(", %d without item ids skipped", skipped) or "",
+    used and " Your prices use it now." or "", tail))
   -- What the scan found, right here in chat, so the scan button pays off without opening anything.
   if db.settings.scanSummary and NS.DealSummary and NS.ScanSummaryText then
     local ok, text = pcall(function() return NS.ScanSummaryText(NS.DealSummary()) end)
@@ -727,6 +737,15 @@ finishScan = function()
     if nudge then print_(nudge) end
   end
   if NS.RefreshBar then NS.RefreshBar() end
+end
+
+-- The player's own scan has been read into the prices (Prices.lua): redraw what shows them, and
+-- let the watchlist see the fresh lowest prices.
+function NS.OnPricesChanged()
+  if NS.RefreshWindow then NS.RefreshWindow() end
+  if NS.RefreshBar then NS.RefreshBar() end
+  if NS.RefreshBroker then NS.RefreshBroker() end
+  if NS.CheckAlerts then NS.CheckAlerts() end
 end
 
 local function beginPacking()
@@ -1017,10 +1036,13 @@ function NS.Status()
     if t.seed then
       print_(string.format("price table: %d items, the %s snapshot shipped with the addon; install AHledger sync from ahledger.com/download for live prices", t.count or 0, NS.TableDate(market) or "release"))
     else
-      print_(string.format("price table: %d items, %d min old", t.count or 0, math.floor((NS.TableAge(market) or 0) / 60)))
+      print_(string.format("price table: %d items, newest scan in it %d min ago", t.count or 0, math.floor(math.max(0, now() - (t.updated or now())) / 60)))
     end
   else
     print_("no price table for this market yet: run AHledger sync, or paste one with /ahl import")
+  end
+  if NS.OwnScanInUse and NS.OwnScanInUse(market) then
+    print_(string.format("lowest prices, medians and listed counts come from your scan %s until a newer price table loads", NS.UI.AgoText(NS.TableAge(market) or 0)))
   end
   if last then
     local age = now() - (last.ts or 0)
@@ -1081,6 +1103,7 @@ SlashCmdList["AHLEDGER"] = function(msg)
     print_("auto-scan " .. (db.settings.autoScan and "on" or "off"))
   elseif cmd == "clear" then
     db.scans = {}
+    if NS.ForgetOwnScan then NS.ForgetOwnScan() end
     print_("stored scans cleared")
   elseif cmd == "" then
     if NS.ToggleWindow then NS.ToggleWindow() else NS.Status() end
@@ -1127,7 +1150,14 @@ AHledger:SetScript("OnEvent", function(_, event, arg1)
     if NS.TableIsSeed and NS.TableIsSeed(market) then
       print_(string.format("v%s loaded. %s. /ahl for options.", NS.VERSION, NS.SeedNote(market)))
     elseif NS.TableFor and NS.TableFor(market) then
-      print_(string.format("v%s loaded. Prices for %s are %d min old. /ahl for options.", NS.VERSION, NS.MarketLabel(market), math.floor((NS.TableAge(market) or 0) / 60)))
+      -- The scan the prices are about to take up (below) is the one to name, if there is one.
+      local mine = NS.LatestLocalScan and NS.LatestLocalScan()
+      local t = NS.TableFor(market)
+      local text = NS.PricesAgeText(market) or "no scan yet"
+      if mine and mine.ts and market == NS.ClientMarket() and (t.seed or (t.updated or 0) < mine.ts) then
+        text = "your scan " .. NS.UI.AgoText(math.max(0, now() - mine.ts))
+      end
+      print_(string.format("v%s loaded. Prices for %s: %s. /ahl for options.", NS.VERSION, NS.MarketLabel(market), text))
     else
       print_(string.format("v%s loaded. No price table for %s yet: run AHledger sync, or paste one with /ahl import. /ahl for options.", NS.VERSION, NS.MarketLabel(market)))
     end
@@ -1140,6 +1170,9 @@ AHledger:SetScript("OnEvent", function(_, event, arg1)
     if invite then print_(invite) end
     -- The account watchlist sync wrote into the data file, and what moved since the last table.
     if NS.CrossMarketReset then NS.CrossMarketReset() end
+    -- A scan of the player's newer than the table that loaded (sent by the last reload, not yet
+    -- in a table sync has brought down): the prices use it, read over the next frames.
+    if NS.UseOwnScan and NS.LatestLocalScan then pcall(NS.UseOwnScan, NS.LatestLocalScan()) end
     if NS.WatchSyncFromData then pcall(NS.WatchSyncFromData) end
     if NS.MarketPulse then pcall(NS.MarketPulse) end
     -- Safety net: mirror every minute in case a change slipped past the explicit saves.

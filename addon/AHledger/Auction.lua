@@ -135,20 +135,56 @@ local function ensurePanel(anchor)
   return panel
 end
 
--- The lowest live listing for an item from the house's own search, when the sell frame ran one.
-local function liveMinimum(itemID, isCommodity)
+-- The lowest unit price among a search's rows, leaving out rows that are all the player's own
+-- (undercutting yourself only lowers your price). rows = { { price, quantity, own } } in the
+-- house's order. nil when there is none. Pure, for the harness.
+function NS.LowestListing(rows)
+  local best = nil
+  for _, r in ipairs(rows or {}) do
+    local qty = math.max(1, tonumber(r.quantity) or 1)
+    local own = tonumber(r.own) or 0
+    if r.price and r.price > 0 and own < qty then
+      local unit = math.floor(r.price)
+      if not best or unit < best then best = unit end
+    end
+  end
+  return best
+end
+
+local LIVE_ROWS = 40 -- the first rows of a search; the house sorts them cheapest first
+
+-- The lowest live listing for an item from the house's own search, the one the sell frame runs
+-- when an item is placed in it. Up to 0.13.1 this was read only as the item was placed, before
+-- the search had answered, so the panel showed the price table's lowest even with cheaper
+-- listings on screen; the panel now redraws when the results arrive.
+local function liveMinimum(itemID, isCommodity, itemKey)
   if not C_AuctionHouse then return nil end
   local ok, value = pcall(function()
+    local rows = {}
     if isCommodity and C_AuctionHouse.GetCommoditySearchResultInfo and C_AuctionHouse.GetNumCommoditySearchResults then
-      if (C_AuctionHouse.GetNumCommoditySearchResults(itemID) or 0) > 0 then
-        local r = C_AuctionHouse.GetCommoditySearchResultInfo(itemID, 1)
-        return r and r.unitPrice or nil
+      local n = math.min(LIVE_ROWS, C_AuctionHouse.GetNumCommoditySearchResults(itemID) or 0)
+      for i = 1, n do
+        local r = C_AuctionHouse.GetCommoditySearchResultInfo(itemID, i)
+        if r then rows[#rows + 1] = { price = r.unitPrice, quantity = r.quantity, own = r.numOwnerItems } end
+      end
+    elseif itemKey and C_AuctionHouse.GetItemSearchResultInfo and C_AuctionHouse.GetNumItemSearchResults then
+      local n = math.min(LIVE_ROWS, C_AuctionHouse.GetNumItemSearchResults(itemKey) or 0)
+      for i = 1, n do
+        local r = C_AuctionHouse.GetItemSearchResultInfo(itemKey, i)
+        if r and r.buyoutAmount then
+          local qty = math.max(1, r.quantity or 1)
+          rows[#rows + 1] = { price = r.buyoutAmount / qty, quantity = qty, own = r.containsOwnerItem and qty or 0 }
+        end
       end
     end
-    return nil
+    return NS.LowestListing(rows)
   end)
   return ok and value or nil
 end
+
+-- When the lowest listing on the house is this far under the price table's, the table is behind
+-- the market and the panel says so.
+local STALE_SHARE = 0.6
 
 -- The posting panel's pace lines, or nil: "AH sales: sells steadily, ~200 sold a day" and, when
 -- you carry some, "At that pace your 120 would sell in about 14 hours". Pure, for the harness.
@@ -202,13 +238,17 @@ setQuantity = function(n)
   if ok then NS.Print("quantity set to " .. n .. "; check the duration and post when ready") end
 end
 
-function NS.ShowPosting(anchor, itemID, isCommodity)
+local shown = nil -- { anchor, itemID, isCommodity, itemKey } of the item in the panel
+
+function NS.ShowPosting(anchor, itemID, isCommodity, itemKey)
   if not NS.Setting("postingHelper") then return end
   if not itemID then
+    shown = nil
     if panel then panel:Hide() end
     return
   end
-  local live = liveMinimum(itemID, isCommodity)
+  shown = { anchor = anchor, itemID = itemID, isCommodity = isCommodity, itemKey = itemKey }
+  local live = liveMinimum(itemID, isCommodity, itemKey)
   local s = NS.PostingSuggestions(itemID, live)
   local p = ensurePanel(anchor)
   p.s = s
@@ -227,6 +267,12 @@ function NS.ShowPosting(anchor, itemID, isCommodity)
     if row and row.median then lines[#lines + 1] = "Median " .. NS.Gold(row.median) .. "  " .. UI.ChangeText(row) end
     if row and row.min then lines[#lines + 1] = "Lowest in table " .. NS.Gold(row.min) end
     if live then lines[#lines + 1] = "Lowest right now " .. NS.Gold(live) end
+    local floor = row and (row.min or row.median)
+    if live and floor and live < floor * STALE_SHARE then
+      lines[#lines + 1] = UI.DOWN .. "Listed now far under the table" .. UI.R
+    end
+    local age = row and NS.PricesAgeText(NS.Market())
+    if age then lines[#lines + 1] = UI.GREY .. "Table: " .. age .. UI.R end
     if row and (row.lo or row.hi) then lines[#lines + 1] = "30 day " .. NS.Gold(row.lo or row.median) .. UI.GREY .. " to " .. UI.R .. NS.Gold(row.hi or row.median) end
     if row and row.qty and row.qty > 0 then lines[#lines + 1] = UI.Comma(row.qty) .. " listed" end
     local carried = GetItemCount and GetItemCount(itemID) or 0
@@ -257,6 +303,22 @@ function NS.ShowPosting(anchor, itemID, isCommodity)
   p:Show()
 end
 
+-- The house answered a search. When it is for the item in the panel, the panel is drawn again
+-- with the lowest listing. arg = the item id (commodities) or the item key (other items).
+function NS.OnAuctionSearchResults(event, arg)
+  if not shown or not panel or not panel:IsShown() then return end
+  local id = type(arg) == "table" and arg.itemID or arg
+  if id ~= shown.itemID then return end
+  if event == "ITEM_SEARCH_RESULTS_UPDATED" and type(arg) == "table" then shown.itemKey = shown.itemKey or arg end
+  NS.ShowPosting(shown.anchor, shown.itemID, shown.isCommodity, shown.itemKey)
+end
+
+local function itemKeyFromLocation(location)
+  if not location or not C_AuctionHouse or not C_AuctionHouse.GetItemKeyFromItem then return nil end
+  local ok, key = pcall(C_AuctionHouse.GetItemKeyFromItem, location)
+  return ok and key or nil
+end
+
 local function itemIdFromLocation(location)
   if not location then return nil end
   if C_Item and C_Item.GetItemID and C_Item.DoesItemExist then
@@ -277,15 +339,15 @@ local function hookModernSell()
     local commodityFrame = AuctionHouseFrame.CommoditiesSellFrame
     if itemFrame and itemFrame.SetItem then
       hooksecurefunc(itemFrame, "SetItem", function(self, location)
-        NS.ShowPosting(AuctionHouseFrame, itemIdFromLocation(location), false)
+        NS.ShowPosting(AuctionHouseFrame, itemIdFromLocation(location), false, itemKeyFromLocation(location))
       end)
-      itemFrame:HookScript("OnHide", function() if panel then panel:Hide() end end)
+      itemFrame:HookScript("OnHide", function() shown = nil; if panel then panel:Hide() end end)
     end
     if commodityFrame and commodityFrame.SetItem then
       hooksecurefunc(commodityFrame, "SetItem", function(self, location)
         NS.ShowPosting(AuctionHouseFrame, itemIdFromLocation(location), true)
       end)
-      commodityFrame:HookScript("OnHide", function() if panel then panel:Hide() end end)
+      commodityFrame:HookScript("OnHide", function() shown = nil; if panel then panel:Hide() end end)
     end
   end)
 end
@@ -462,15 +524,20 @@ function NS.HookAuctionHouse()
 end
 
 local events = CreateFrame("Frame")
-for _, e in ipairs({ "AUCTION_HOUSE_SHOW", "AUCTION_HOUSE_CLOSED", "NEW_AUCTION_UPDATE", "ADDON_LOADED" }) do
-  -- NEW_AUCTION_UPDATE exists only on Classic clients; an unknown event must not abort the file.
+for _, e in ipairs({ "AUCTION_HOUSE_SHOW", "AUCTION_HOUSE_CLOSED", "NEW_AUCTION_UPDATE", "ADDON_LOADED",
+    "COMMODITY_SEARCH_RESULTS_UPDATED", "ITEM_SEARCH_RESULTS_UPDATED" }) do
+  -- NEW_AUCTION_UPDATE exists only on Classic clients and the search events only on the modern
+  -- house; an unknown event must not abort the file.
   pcall(events.RegisterEvent, events, e)
 end
 events:SetScript("OnEvent", function(_, event, arg1)
   if event == "AUCTION_HOUSE_SHOW" then
     NS.HookAuctionHouse()
   elseif event == "AUCTION_HOUSE_CLOSED" then
+    shown = nil
     if panel then panel:Hide() end
+  elseif event == "COMMODITY_SEARCH_RESULTS_UPDATED" or event == "ITEM_SEARCH_RESULTS_UPDATED" then
+    guard("posting helper", NS.OnAuctionSearchResults, event, arg1)
   elseif event == "NEW_AUCTION_UPDATE" then
     classicSellUpdate()
   elseif event == "ADDON_LOADED" and (arg1 == "Blizzard_AuctionHouseUI" or arg1 == "Blizzard_AuctionUI") then

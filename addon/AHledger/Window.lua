@@ -27,11 +27,40 @@ local function refreshHeader()
   local market = NS.Market()
   local pinned = (NS.Setting("market") or "") ~= ""
   window.marketButton:SetText(NS.MarketLabel(market) .. (pinned and "  (pinned)" or "") .. "  ▾")
-  if NS.TableIsSeed(market) then
-    window.age:SetText("Prices: |cffffd23f" .. (NS.TableDate(market) or "release") .. " snapshot|r, sync for live")
-  else
-    window.age:SetText("Prices " .. UI.AgeColored(NS.TableAge(market)))
+  window.age:SetText(NS.PricesHeaderText(market))
+end
+
+-- The window header's line about the prices: whose scan they come from and when. Pure apart
+-- from the tables, for the harness.
+--   "Last scan on this realm 2 h ago"   "Your scan 3 min ago"   "Prices: Oct 1 snapshot, ..."
+function NS.PricesHeaderText(market)
+  market = market or NS.Market()
+  local own = NS.OwnScanInUse(market)
+  if NS.TableIsSeed(market) and not own then
+    return "Prices: |cffffd23f" .. (NS.TableDate(market) or "release") .. " snapshot|r, sync for live"
   end
+  local age = NS.TableAge(market)
+  if not age then return "Prices: " .. UI.DOWN .. "no price table" .. UI.R end
+  return (own and "Your scan " or "Last scan on this realm ") .. UI.AgeColor(age) .. UI.AgoText(age) .. UI.R
+end
+
+-- What the prices' age means, for the tooltip over the header and the minimap button. Pure.
+function NS.PricesHelpLines(market)
+  market = market or NS.Market()
+  local age = NS.TableAge(market)
+  if NS.OwnScanInUse(market) then
+    return {
+      "Lowest prices, medians and listed counts come from your own scan. The 7 and 30 day figures and the sales pace come from ahledger.com.",
+      "Type /reload to share your scan. Sync sends it, and the price table built from it replaces your scan once it loads.",
+    }
+  end
+  if NS.TableIsSeed(market) then return { NS.SeedNote(market) } end
+  local out = { "Prices come from every player's scans of this auction house. The time is when the newest one was taken." }
+  if age and age >= 3600 then
+    out[#out + 1] = "Scan at the auction house to refresh them: your tooltips use your scan straight away."
+  end
+  out[#out + 1] = "The game reads new prices from sync at login and on /reload."
+  return out
 end
 
 local function marketMenu()
@@ -176,6 +205,18 @@ local function ensureWindow()
   window.age = window:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
   window.age:SetPoint("TOPRIGHT", -40, -36)
   window.age:SetJustifyH("RIGHT")
+  -- Hovering the line explains it (0.13.1); a font string takes no mouse, so a frame covers it.
+  local ageHover = CreateFrame("Frame", nil, window)
+  ageHover:SetAllPoints(window.age)
+  ageHover:EnableMouse(true)
+  ageHover:SetScript("OnEnter", function(self)
+    if not GameTooltip or GameTooltip:IsForbidden() then return end
+    GameTooltip:SetOwner(self, "ANCHOR_BOTTOMLEFT")
+    GameTooltip:AddLine("Prices", 1, 1, 1)
+    for _, l in ipairs(NS.PricesHelpLines()) do GameTooltip:AddLine(l, 0.8, 0.8, 0.8, true) end
+    GameTooltip:Show()
+  end)
+  ageHover:SetScript("OnLeave", function() if GameTooltip and not GameTooltip:IsForbidden() then GameTooltip:Hide() end end)
 
   UI.Label(window, "Look up", "GameFontNormalSmall", 16, -48, 50)
   window.lookupBox = UI.EditBox(window, 220, 72, -44, lookup)
@@ -256,7 +297,7 @@ function NS.RefreshScanFooter()
   local parts = {}
   if t then parts[#parts + 1] = string.format("%s prices for %s items", NS.MarketLabel(market), UI.Comma(t.count or 0)) end
   if state.last then
-    parts[#parts + 1] = string.format("your last scan %s", UI.AgeText(NS.Now() - (state.last.ts or NS.Now())) or "")
+    parts[#parts + 1] = string.format("your last scan %s", UI.AgoText(NS.Now() - (state.last.ts or NS.Now())) or "")
     if state.unsent then parts[#parts + 1] = UI.DOWN .. "not sent yet: /reload" .. UI.R end
   end
   window.footer:SetText(#parts > 0 and table.concat(parts, "  ·  ") or "No price table yet: run AHledger sync or import one")
@@ -287,10 +328,12 @@ local minimapButton = nil
 local function statusLines(tt)
   local market = NS.Market()
   tt:AddLine(UI.ACCENT .. "AHledger" .. UI.R .. " " .. NS.VERSION)
-  if NS.TableIsSeed(market) then
+  if NS.TableIsSeed(market) and not NS.OwnScanInUse(market) then
     tt:AddLine(NS.SeedNote(market), 1, 0.82, 0.25, true)
   else
-    tt:AddLine(NS.MarketLabel(market) .. ": prices " .. UI.AgeColored(NS.TableAge(market)), 1, 1, 1)
+    tt:AddLine(NS.MarketLabel(market) .. ": " .. NS.PricesHeaderText(market):gsub("^%u", string.lower), 1, 1, 1)
+    local help = NS.PricesHelpLines(market)
+    for i = 1, #help - 1 do tt:AddLine(help[i], 0.7, 0.7, 0.72, true) end
   end
   if NS.ScanStatusLines then NS.ScanStatusLines(tt) end
   local n = 0
@@ -422,15 +465,12 @@ function NS.InitBroker()
       end,
       OnTooltipShow = function(tt) statusLines(tt) end,
     })
+    -- "scanned 2 h ago", "your scan 3 min ago", "Oct 1 snapshot".
+    function NS.RefreshBroker()
+      if NS.Broker then NS.Broker.text = NS.PricesAgeText(NS.Market()) or "no prices" end
+    end
     local function tick()
-      if NS.Broker then
-        local age = NS.TableAge(NS.Market())
-        if NS.TableIsSeed(NS.Market()) then
-          NS.Broker.text = "prices " .. (NS.TableDate(NS.Market()) or "") .. " snapshot"
-        else
-          NS.Broker.text = age and ("prices " .. (UI.AgeText(age) or "")) or "no prices"
-        end
-      end
+      NS.RefreshBroker()
       if C_Timer and C_Timer.After then C_Timer.After(60, tick) end
     end
     tick()

@@ -336,7 +336,7 @@ local function ensureBar()
       for _, r in ipairs(s.deals.top or {}) do
         tt:AddDoubleLine((r.link or r.name) .. (NS.Setting("barPace") and NS.PaceSuffix(r.price) or ""), string.format("%s  %s%.0f%% under%s", NS.Gold(r.unit), UI.UP, r.below, UI.R))
       end
-      if s.deals.scan then tt:AddLine(UI.GREY .. "Scan " .. (UI.AgeText(NS.Now() - (s.deals.scan.ts or NS.Now())) or "") .. UI.R) end
+      if s.deals.scan then tt:AddLine(UI.GREY .. "Scan " .. (UI.AgoText(NS.Now() - (s.deals.scan.ts or NS.Now())) or "") .. UI.R) end
     else
       tt:AddLine("No scan for this realm and faction yet. Open the auction house and press Scan.", 0.7, 0.7, 0.72, true)
     end

@@ -55,7 +55,8 @@ function NS.ComputeDeals(pct, minValue)
   local market = NS.Market()
   local rows = {}
   for id, m in pairs(NS.ScanMinima(scan)) do
-    local p = NS.Price(id, market)
+    -- The table's row: the scan's own median laid over it (Prices.lua) is the scan judging itself.
+    local p = NS.TablePrice(id, market)
     local ref = p and (p.m30 or p.median)
     if ref and ref >= minValue and m.unit <= ref * (1 - pct / 100) then
       local name, link = GetItemInfo(id)
@@ -136,7 +137,7 @@ local function refresh()
   if scan then
     local age = NS.Now() - (scan.ts or NS.Now())
     tab.status:SetText(string.format("From your scan %s, %s listings on %s. %d item%s at least %d%% under the 30 day median%s%s.",
-      UI.AgeText(age) or "", UI.Comma(scan.count or 0), NS.MarketLabel(NS.Market()), #rows, #rows == 1 and "" or "s", pct,
+      UI.AgoText(age) or "", UI.Comma(scan.count or 0), NS.MarketLabel(NS.Market()), #rows, #rows == 1 and "" or "s", pct,
       selling and " that sell at least one a day on the AH" or "", NS.SnapshotSuffix()))
   else
     tab.status:SetText(UI.GREY .. "No scan for this realm and faction yet. Open the auction house and press Scan; deals compare your scan with the price table." .. UI.R)

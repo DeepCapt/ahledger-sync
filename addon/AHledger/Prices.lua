@@ -90,9 +90,201 @@ function NS.TableFor(market)
   return c
 end
 
+-- ---------------------------------------------------------------------------------------------
+-- The player's own scan, folded into the prices (0.13.1). A table's prices are as old as the
+-- newest scan anybody uploaded, and the game reads a new table only at login or /reload, so a
+-- player who had just scanned kept seeing "2 h old" until two reloads later (one to send the
+-- scan, one to load the table built from it). The scan is already here, so the lowest buyout,
+-- the median and the number listed come from it as soon as it is read; the 7 and 30 day
+-- figures and the sell pace stay the table's. Only the market the scan was taken on, only
+-- while the scan is newer than the table: once a table built after it is loaded, the table
+-- (which then holds the scan) is used again.
+-- ---------------------------------------------------------------------------------------------
+
+-- The same rules the site applies to an upload (packages/shared/src/addon.ts and the upload
+-- validator), so the numbers match the table that will be built from this scan.
+local MAX_COPPER = 10000000000000 -- a listing above this is garbage and is dropped whole
+local MAX_QUANTITY = 10000
+local UNIT_CEILING = 250000 * 10000 -- no unit kept above 250,000 gold
+local NO_HISTORY_CEILING = 50000 * 10000 -- nor above 50,000 gold without a 30 day median
+local OUTLIER_MULTIPLE = 20 -- nor beyond 20x either side of the 30 day median
+local ENTRIES_PER_STEP = 4000
+local ITEMS_PER_STEP = 500
+
+local overlay = nil -- { market, ts, items = { [id] = { median, min, qty } }, merged = {} }
+local building = nil -- the scan being read, between frames
+
+-- Lowest buyout, quantity-weighted median and units listed for one item, from { [unit] = qty }.
+local function summarize(units)
+  local prices, total = {}, 0
+  for unit, qty in pairs(units) do
+    prices[#prices + 1] = unit
+    total = total + qty
+  end
+  if total <= 0 then return nil end
+  table.sort(prices)
+  local target, cumulative, median = math.max(1, math.ceil(total * 0.5)), 0, prices[#prices]
+  for _, unit in ipairs(prices) do
+    cumulative = cumulative + units[unit]
+    if cumulative >= target then median = unit break end
+  end
+  return { median = median, min = prices[1], qty = total }
+end
+
+-- One listing into the per-item buckets, or nothing when the site would drop it.
+local function addListing(byItem, history, id, stack, buyout, bid)
+  id, stack, buyout, bid = tonumber(id), tonumber(stack), tonumber(buyout), tonumber(bid)
+  if not id or id <= 0 or not stack or stack <= 0 or stack > MAX_QUANTITY then return end
+  if not buyout or buyout <= 0 or buyout > MAX_COPPER or (bid or 0) > MAX_COPPER then return end
+  local unit = math.max(1, math.floor(buyout / stack + 0.5))
+  if unit > UNIT_CEILING then return end
+  local row = history and history[id]
+  local m30 = row and row.m30
+  if m30 and m30 > 0 then
+    if unit > m30 * OUTLIER_MULTIPLE or unit < m30 / OUTLIER_MULTIPLE then return end
+  elseif unit > NO_HISTORY_CEILING then
+    return
+  end
+  local units = byItem[id]
+  if not units then units = {} byItem[id] = units end
+  units[unit] = (units[unit] or 0) + stack
+end
+
+local LISTING = "(%d+):(%d+):(%d+):(%d+):%d+"
+
+-- Every item's lowest buyout, median and units listed from a scan's data string, in one go.
+-- `history` is the market's table items (for the 30 day medians the outlier rule needs), or
+-- nil. Pure, for the harness; the game reads a scan a few thousand listings a frame instead.
+function NS.SummarizeScan(data, history)
+  local byItem, items = {}, {}
+  if type(data) ~= "string" then return items end
+  for id, stack, buyout, bid in data:gmatch(LISTING) do addListing(byItem, history, id, stack, buyout, bid) end
+  for id, units in pairs(byItem) do items[id] = summarize(units) end
+  return items
+end
+
+-- The market the client itself is on, whatever the options pin. A scan always belongs to it.
+local function scanMarket()
+  return NS.ClientMarket and NS.ClientMarket() or NS.Market()
+end
+
+local function overlayActive(market)
+  if not overlay or overlay.market ~= market then return false end
+  local t = NS.TableFor(market)
+  -- A table stamped at or after the scan was built from it (or from something newer).
+  return not t or t.seed or (t.updated or 0) < overlay.ts
+end
+
+local function overlayDone(scan, market, items)
+  building = nil
+  overlay = { market = market, ts = scan.ts, items = items, merged = {}, count = scan.count }
+  if NS.CrossMarketReset then NS.CrossMarketReset() end
+  if NS.OnPricesChanged then pcall(NS.OnPricesChanged) end
+end
+
+-- Reads a scan into the prices: right after the scanner saves one, and at login for a scan
+-- newer than the table that loaded. Spread over frames so a full house does not stall the game;
+-- `sync` reads it at once (the harness, or a client without C_Timer). Returns true when started.
+function NS.UseOwnScan(scan, sync)
+  if type(scan) ~= "table" or type(scan.data) ~= "string" or not scan.ts or scan.full == false then return false end
+  local market = scanMarket()
+  local t = NS.TableFor(market)
+  if t and not t.seed and (t.updated or 0) >= scan.ts then return false end -- the table already has it
+  if overlay and overlay.market == market and overlay.ts >= scan.ts then return false end
+  local history = t and t.items or nil
+  if sync or not (C_Timer and C_Timer.After) then
+    overlayDone(scan, market, NS.SummarizeScan(scan.data, history))
+    return true
+  end
+  local job = { scan = scan, market = market, history = history, byItem = {}, next = scan.data:gmatch(LISTING) }
+  building = job
+  local function step()
+    if building ~= job then return end -- a newer scan took over
+    local ok, err = pcall(function()
+      if job.next then
+        for _ = 1, ENTRIES_PER_STEP do
+          local id, stack, buyout, bid = job.next()
+          if not id then
+            job.next = nil
+            job.ids, job.items, job.i = {}, {}, 0
+            for k in pairs(job.byItem) do job.ids[#job.ids + 1] = k end
+            break
+          end
+          addListing(job.byItem, job.history, id, stack, buyout, bid)
+        end
+      else
+        local stop = math.min(job.i + ITEMS_PER_STEP, #job.ids)
+        for i = job.i + 1, stop do
+          local id = job.ids[i]
+          job.items[id] = summarize(job.byItem[id])
+          job.byItem[id] = nil
+        end
+        job.i = stop
+        if stop >= #job.ids then overlayDone(job.scan, job.market, job.items) return end
+      end
+      C_Timer.After(0, step)
+    end)
+    if not ok then
+      building = nil
+      if NS.NoteError then NS.NoteError("own scan prices", err) end
+    end
+  end
+  step()
+  return true
+end
+
+-- Forgets the scan overlay; the harness and /ahl clear use it.
+function NS.ForgetOwnScan()
+  overlay, building = nil, nil
+end
+
+-- When the market's prices were seen and whether they come from the player's own scan:
+-- ts (unix seconds) and true for the scan, the table's stamp and false, or nil.
+function NS.PricesSeen(market)
+  market = market or NS.Market()
+  if overlayActive(market) then return overlay.ts, true end
+  local t = NS.TableFor(market)
+  if not t or not t.updated or t.updated == 0 then return nil, false end
+  return t.updated, false
+end
+
+-- True while the market's lowest prices and listed counts come from the player's own scan.
+function NS.OwnScanInUse(market)
+  return overlayActive(market or NS.Market())
+end
+
+-- The row a tooltip reads: the table's, with the scan's lowest, median and listed laid over it.
+-- An item the table prices but the scan did not see is listed by nobody now: no lowest, none
+-- listed, the table's median kept as the last one known.
+local function mergedRow(id, base)
+  local hit = overlay.merged[id]
+  if hit ~= nil then return hit or nil end
+  local s = overlay.items[id]
+  local row = false
+  if s or base then
+    row = {}
+    if base then for k, v in pairs(base) do row[k] = v end end
+    if s then
+      row.median, row.min, row.qty = s.median, s.min, s.qty
+    else
+      row.min, row.qty = nil, 0
+    end
+    row.ownScan = true
+  end
+  overlay.merged[id] = row
+  return row or nil
+end
+
+-- The table's own row, without the player's scan: for comparing that scan against the table.
+function NS.TablePrice(itemID, market)
+  local t = NS.TableFor(market or NS.Market())
+  return t and t.items[itemID] or nil, t
+end
+
 function NS.Price(itemID, market)
   market = market or NS.Market()
   local t = NS.TableFor(market)
+  if overlayActive(market) then return mergedRow(itemID, t and t.items[itemID] or nil), t end
   if not t then return nil, t end
   return t.items[itemID], t
 end
@@ -155,15 +347,29 @@ end
 
 -- Watchlist alerts wait for live prices: a threshold met only against an old snapshot would
 -- send the player to the auction house for nothing.
+-- The player's own scan is live prices too.
 function NS.AlertsPaused(market)
-  return NS.TableIsSeed(market)
+  market = market or NS.Market()
+  return NS.TableIsSeed(market) and not overlayActive(market)
 end
 
--- Age of the table in use, in seconds, or nil when there is none.
+-- Age of the prices in use, in seconds, or nil when there are none: since the player's own scan
+-- while it is in use (0.13.1), else since the newest scan in the table.
 function NS.TableAge(market)
-  local t = NS.TableFor(market or NS.Market())
-  if not t or not t.updated or t.updated == 0 then return nil end
-  return math.max(0, NS.Now() - t.updated)
+  local ts = NS.PricesSeen(market)
+  if not ts then return nil end
+  return math.max(0, NS.Now() - ts)
+end
+
+-- "scanned 2 h ago", "your scan 4 min ago" or the snapshot's date: what the prices' age means,
+-- in the words every surface uses. nil without prices. Pure apart from the tables.
+function NS.PricesAgeText(market)
+  market = market or NS.Market()
+  local ts, own = NS.PricesSeen(market)
+  if not ts then return nil end
+  if own then return "your scan " .. NS.UI.AgoText(math.max(0, NS.Now() - ts)) end
+  if NS.TableIsSeed(market) then return (NS.TableDate(market) or "release") .. " snapshot" end
+  return "scanned " .. NS.UI.AgoText(math.max(0, NS.Now() - ts))
 end
 
 -- ---------------------------------------------------------------------------------------------

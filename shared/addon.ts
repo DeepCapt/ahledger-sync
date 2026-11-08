@@ -16,8 +16,20 @@ import { marketRegionFor, type Region } from './markets';
 
 export const UPLOAD_VERSION = 1;
 export const ADDON_UPLOAD_QUEUE = 'addon-upload';
-export const UPLOAD_MAX_BYTES = 5 * 1024 * 1024;
-export const UPLOAD_MAX_AUCTIONS = 250_000;
+/** Compressed. A full scan of 600,000 listings gzips to about 5 MB. */
+export const UPLOAD_MAX_BYTES = 10 * 1024 * 1024;
+/**
+ * Listings in one scan. The EU megaserver houses of Forever passed 250,000 within days of the EU
+ * launch (EU PvP Horde: 249,456 on 2026-11-07, refused from the next scan on), so the ceiling
+ * sits well above the biggest house seen rather than at it.
+ */
+export const UPLOAD_MAX_AUCTIONS = 600_000;
+/**
+ * A scan's JSON once inflated, checked by the API and again by the worker: 600,000 listings is
+ * about 16 MB, so anything past this is a decompression bomb. Decoding one that size takes
+ * about 70 MB.
+ */
+export const UPLOAD_SCAN_MAX_INFLATED_BYTES = 24 * 1024 * 1024;
 /** Accepted clock skew between the uploader and the API. */
 export const UPLOAD_SKEW_MS = 5 * 60_000;
 /** Nonces are remembered this long; requests older than the skew window are refused anyway. */
