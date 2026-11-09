@@ -17,7 +17,7 @@
 ]]
 
 local ADDON_NAME, NS = ...
-NS.VERSION = "0.13.2"
+NS.VERSION = "0.13.3"
 
 local MAX_SCANS_PER_MARKET = 3 -- newest scans kept per realm+faction (about 1 MB each at 50k listings)
 local MAX_SCANS_TOTAL = 12 -- hard ceiling on the SavedVariables file across every realm and faction
@@ -59,6 +59,125 @@ function NS.Now()
   return GetServerTime and GetServerTime() or time()
 end
 local now = NS.Now
+
+-- ---------------------------------------------------------------------------------------------
+-- Frame slices (0.13.3)
+--
+-- Long jobs (packing a scan, reading it into the prices, finding its deals) do a slice of work
+-- per frame and yield. A slice used to be a row count, 4,000, which on a live house of 150,000
+-- listings held the client near 3 frames a second for half a minute after every scan (a player
+-- measured it with the client's script profiling). A slice is now time: a job works until its
+-- budget is spent, reading the clock every SLICE_CHECK rows.
+--
+-- The budget adapts to the frame (NS.NextSlice). A frame is measured from one frame's first slice
+-- to the next frame's. One longer than SLICE_FRAME_MS cuts the budget to what that frame left
+-- (its length less AHledger's work, taken from SLICE_FRAME_MS) and remembers a ceiling just
+-- under the budget that overran; one inside it grows the budget by SLICE_GROW_MS, up to the
+-- ceiling or SLICE_MAX_MS. Growing slowly and remembering the ceiling matters with vsync: frames
+-- come in steps of 16.7 ms, a slice one millisecond too long doubles the frame, and reacting to
+-- each frame on its own swung between 60 and 30 frames a second. The ceiling rises again after
+-- SLICE_RELAX_FRAMES good frames, in case the game was only busy for a moment. Under a frame cap
+-- (or a slow PC) every frame is long and the budget stays at SLICE_MIN_MS.
+--
+-- The budget is per frame, not per job: after a scan the prices and the deals are read at the
+-- same time, and they share it (GetTime is the same all through a frame, which tells the jobs
+-- they are in one). Without debugprofilestop (the harness unless it supplies a clock) a slice is
+-- the job's fixed row count, as before.
+-- ---------------------------------------------------------------------------------------------
+local SLICE_FRAME_MS = 25 -- the frame time aimed for while a job runs: 40 frames a second
+local SLICE_MIN_MS = 5 -- at 30 frames a second, 5 ms more is barely felt, and a save still ends
+local SLICE_MAX_MS = 12
+local SLICE_FIRST_MS = 6 -- before there is a frame to measure, or after a pause
+local SLICE_GROW_MS = 0.5 -- added per frame inside the target
+local SLICE_RELAX_FRAMES = 120 -- good frames before a ceiling rises by a millisecond
+local SLICE_GAP_MS = 250 -- a longer gap since the last slice is a pause, not a frame
+local SLICE_CHECK = 20 -- rows between clock reads
+NS.SLICE_FRAME_MS, NS.SLICE_MIN_MS, NS.SLICE_MAX_MS, NS.SLICE_CHECK = SLICE_FRAME_MS, SLICE_MIN_MS, SLICE_MAX_MS, SLICE_CHECK
+
+-- The next frame's slice from the last one's: `prev` { budget, ceiling, good }, the last frame's
+-- length and AHledger's work in it, in ms. Returns a new { budget, ceiling, good }. Pure.
+function NS.NextSlice(prev, intervalMs, workedMs)
+  local budget = prev and prev.budget or SLICE_FIRST_MS
+  local ceiling, good = prev and prev.ceiling or nil, prev and prev.good or 0
+  local worked = workedMs or 0
+  if intervalMs > SLICE_FRAME_MS then
+    if worked > 0 then
+      ceiling = math.max(SLICE_MIN_MS, math.min(ceiling or SLICE_MAX_MS, budget - 1))
+    end
+    budget = math.max(SLICE_MIN_MS, math.min(budget, SLICE_FRAME_MS - (intervalMs - worked)))
+    good = 0
+  else
+    good = good + 1
+    if ceiling and good >= SLICE_RELAX_FRAMES then
+      ceiling, good = ceiling + 1, 0
+      if ceiling >= SLICE_MAX_MS then ceiling = nil end
+    end
+    budget = math.min(SLICE_MAX_MS, ceiling or SLICE_MAX_MS, budget + SLICE_GROW_MS)
+  end
+  return { budget = budget, ceiling = ceiling, good = good }
+end
+
+-- The clock in milliseconds, or nil. Read at each use so the harness can supply one.
+local function sliceClock()
+  local f = NS.SliceClock or debugprofilestop
+  if not f then return nil end
+  local ok, t = pcall(f)
+  return ok and tonumber(t) or nil
+end
+
+-- The frame the slices are in: when its first slice began, its deadline, what the jobs did, and
+-- the controller's state for the next frame.
+local sliceFrame = { id = nil, began = nil, deadline = nil, worked = 0, state = nil }
+
+local function frameId()
+  local ok, t = pcall(function() return GetTime and GetTime() end)
+  return ok and t or nil
+end
+
+-- One job's slicer: s:Begin(fallbackRows, every) at the top of a frame's work, s:More() before
+-- each row (false once the frame's budget is spent), s:End() when the job stops for the frame.
+-- `every` is how many rows go between clock reads (SLICE_CHECK unless a row is heavy).
+local Slicer = {}
+Slicer.__index = Slicer
+function NS.NewSlicer()
+  return setmetatable({ rows = 0 }, Slicer)
+end
+function Slicer:Begin(fallbackRows, every)
+  self.rows = 0
+  self.fallback = fallbackRows
+  self.every = every or SLICE_CHECK
+  local t = sliceClock()
+  self.began = t
+  if not t then
+    self.deadline = nil
+    return
+  end
+  local id = frameId()
+  local f = sliceFrame
+  if not (id and f.id == id and f.deadline) then
+    -- A new frame: the last one's length and AHledger's work in it set this one's budget.
+    if f.began and t - f.began <= SLICE_GAP_MS then
+      f.state = NS.NextSlice(f.state, t - f.began, f.worked)
+    else
+      f.state = { budget = SLICE_FIRST_MS, ceiling = f.state and f.state.ceiling or nil, good = 0 }
+    end
+    f.id, f.began, f.worked = id, t, 0
+    f.deadline = t + f.state.budget
+  end
+  self.deadline = f.deadline
+end
+function Slicer:More()
+  local rows = self.rows
+  self.rows = rows + 1
+  if not self.deadline then return rows < (self.fallback or 4000) end
+  if rows == 0 or rows % (self.every or SLICE_CHECK) ~= 0 then return true end
+  local t = sliceClock()
+  return not t or t < self.deadline
+end
+function Slicer:End()
+  local t = sliceClock()
+  if t and self.began then sliceFrame.worked = (sliceFrame.worked or 0) + (t - self.began) end
+end
 
 -- Settings, with defaults. Every option lives in AHledgerDB.settings so the sync app can read
 -- the contribution switch from the same file it uploads from.
@@ -337,8 +456,9 @@ end
 -- server's once-per-15-minutes allowance. A request the server drops fires
 -- AUCTION_HOUSE_THROTTLED_MESSAGE_DROPPED, which ends the wait; closing the house ends it too.
 --
--- Saving: packing 50,000 rows in one loop froze the client for a moment, so it runs in chunks
--- across frames, and here the count is real: "Saving 31,000 / 53,074".
+-- Saving: packing 50,000 rows in one loop froze the client for a moment, so it runs in slices
+-- across frames (by time since 0.13.3, see Frame slices), and here the count is real:
+-- "Saving 31,000 / 53,074".
 --
 -- Saved: "saved" means saved in memory. The client writes SavedVariables only at logout and
 -- /reload, and AHledger sync reads the disk, so a scan made this session is not sent until one
@@ -346,11 +466,11 @@ end
 -- to reload until it is.
 -- ---------------------------------------------------------------------------------------------
 
-local PACK_CHUNK = 4000 -- listings packed per frame while saving
+local PACK_CHUNK = 4000 -- listings packed per frame while saving, when there is no clock
 local LONG_WAIT_NOTE = 90 -- seconds before chat says once that a wait is long but not dead
 local NO_REPLY_S = 180 -- seconds after which the request has almost certainly been dropped
 local noReplyNoted = false
-local packing = nil -- { index, count, parts, n, skipped } while a listing is being packed
+local packing = nil -- { index, count, pieces, n, skipped, slicer, all } while a listing is being packed
 local ticker = nil
 local refusedAt = nil -- when the server last dropped a request
 local longWaitNoted = false
@@ -639,32 +759,62 @@ local function endScan()
   setButtonState()
 end
 
--- Packs PACK_CHUNK listings, then yields a frame, until the whole list is packed. The replicate
--- list stays readable until the next request or the house closes.
+-- Packs one slice of listings, then yields a frame, until the whole list is packed. The
+-- replicate list stays readable until the next request or the house closes; once the house
+-- closes (`all`) the rest is packed at once rather than lost. Each slice's rows are joined into
+-- one piece as it ends, so the save at the end joins one piece per frame instead of every row.
 local function packStep()
   local p = packing
   if not p then return end
   local ok, err = pcall(function()
-    local stop = math.min(p.index + (p.chunk or PACK_CHUNK), p.count)
-    for index = p.index, stop - 1 do
-      local _, _, stack, _, _, _, _, _, _, buyout, bid, _, _, _, _, _, itemID = C_AuctionHouse.GetReplicateItemInfo(index)
+    local getInfo, getTimeLeft = C_AuctionHouse.GetReplicateItemInfo, C_AuctionHouse.GetReplicateItemTimeLeft
+    local slicer, all = p.slicer, p.all
+    if not all then
+      -- Saving now spans many frames. A listing replaced meanwhile (another addon's scan once the
+      -- server allows it) would mix two listings in one scan: start again on the new one. One
+      -- cleared is a scan lost, and is said so rather than saved short.
+      local live = C_AuctionHouse.GetNumReplicateItems and C_AuctionHouse.GetNumReplicateItems()
+      if live and live ~= p.count then
+        if live <= 0 then
+          p.cleared = true
+          return
+        end
+        p.index, p.count, p.pieces, p.n, p.skipped = 0, live, {}, 0, 0
+      end
+      slicer:Begin(PACK_CHUNK)
+    end
+    local parts, k = {}, 0
+    local index, count = p.index, p.count
+    while index < count and (all or slicer:More()) do
+      local _, _, stack, _, _, _, _, _, _, buyout, bid, _, _, _, _, _, itemID = getInfo(index)
       if itemID and itemID > 0 and stack and stack > 0 then
-        local timeLeft = C_AuctionHouse.GetReplicateItemTimeLeft(index) or 0
-        p.n = p.n + 1
+        local timeLeft = getTimeLeft(index) or 0
+        k = k + 1
         -- Prices are written with %.0f, not %d: the client's %d is a 32-bit integer, and one
         -- listing at 99,999,999,999,999 copper (somebody's joke, or a mistake) threw "integer
         -- overflow" and took the whole scan with it. A number that large is still a number;
         -- what to do with it is decided at upload, where anything past the copper cap is dropped.
-        p.parts[p.n] = string.format("%d:%d:%.0f:%.0f:%d", itemID, stack, tonumber(buyout) or 0, tonumber(bid) or 0, timeLeft)
+        parts[k] = string.format("%d:%d:%.0f:%.0f:%d", itemID, stack, tonumber(buyout) or 0, tonumber(bid) or 0, timeLeft)
       else
         p.skipped = p.skipped + 1
       end
+      index = index + 1
     end
-    p.index = stop
+    if k > 0 then
+      p.pieces[#p.pieces + 1] = table.concat(parts, ";")
+      p.n = p.n + k
+    end
+    p.index = index
+    if not all then slicer:End() end
   end)
   if not ok then
     endScan()
     print_("the listing could not be read (" .. tostring(err) .. "); scan discarded")
+    return
+  end
+  if p.cleared then
+    endScan()
+    print_("the listing was cleared before it was saved; scan discarded. Try /ahl scan again once the countdown allows")
     return
   end
   setButtonState()
@@ -679,7 +829,7 @@ end
 
 finishScan = function()
   local p = packing
-  local data, n, skipped = table.concat(p.parts, ";"), p.n, p.skipped
+  local data, n, skipped = table.concat(p.pieces, ";"), p.n, p.skipped
   if n == 0 then
     -- Saving it would record the house as empty and start the countdown for nothing.
     endScan()
@@ -730,11 +880,15 @@ finishScan = function()
     used and " Your prices use it now." or "", tail))
   -- What the scan found, right here in chat, so the scan button pays off without opening anything.
   if db.settings.scanSummary and NS.DealSummary and NS.ScanSummaryText then
-    local ok, text = pcall(function() return NS.ScanSummaryText(NS.DealSummary()) end)
-    if ok and text then print_(text) end
-    -- Once per weekly report, the line to read it (Site.lua; off with siteLinks).
-    local nudge = NS.ReportNudge and NS.ReportNudge(db, time and time() or nil)
-    if nudge then print_(nudge) end
+    local function say()
+      local ok, text = pcall(function() return NS.ScanSummaryText(NS.DealSummary()) end)
+      if ok and text then print_(text) end
+      -- Once per weekly report, the line to read it (Site.lua; off with siteLinks).
+      local nudge = NS.ReportNudge and NS.ReportNudge(db, time and time() or nil)
+      if nudge then print_(nudge) end
+    end
+    -- The deals need the scan read through (Deals.lua), which takes a few frames on a full house.
+    if NS.WithScanMinima then NS.WithScanMinima(scan, say) else say() end
   end
   if NS.RefreshBar then NS.RefreshBar() end
 end
@@ -750,7 +904,7 @@ end
 
 local function beginPacking()
   local count = C_AuctionHouse.GetNumReplicateItems() or 0
-  packing = { index = 0, count = count, parts = {}, n = 0, skipped = 0 }
+  packing = { index = 0, count = count, pieces = {}, n = 0, skipped = 0, slicer = NS.NewSlicer() }
   setButtonState()
   packStep()
 end
@@ -929,7 +1083,7 @@ function NS.ScanEvent(event)
   elseif event == "AUCTION_HOUSE_CLOSED" then
     if scanning and packing then
       -- The listing is already here; finish packing it in one go rather than lose it.
-      packing.chunk = packing.count
+      packing.all = true
       packStep()
       if scanning then
         endScan()

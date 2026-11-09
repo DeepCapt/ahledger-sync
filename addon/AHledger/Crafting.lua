@@ -370,7 +370,59 @@ local function showLine(recipe)
   line:SetText(text)
 end
 
+-- Where the margin line goes on the modern profession form (0.13.3). It used to sit right under
+-- the reagents, which is where Auctionator draws its "To Craft / Profit" lines, so with both
+-- addons the two were drawn over each other (reported); and a recipe with optional reagents had
+-- them under the line too. Now: under Auctionator's block when it shows, otherwise under the
+-- lowest of the reagents, optional reagents and extra slots (the rule Auctionator itself uses),
+-- level with the reagents' left edge. Returns the frame to hang from and the x offset.
+local AUCTIONATOR_BLOCK = "AuctionatorCraftingInfoProfessionsFrame"
+function NS.CraftLineAnchor(form)
+  local reagents = form.Reagents or form
+  local block = _G[AUCTIONATOR_BLOCK]
+  if block and block.GetParent and block:GetParent() == form and block:IsShown() then
+    return block, 0
+  end
+  local lowest = reagents
+  local ok = pcall(function()
+    local others = { form.OptionalReagents }
+    for _, f in ipairs(form.extraSlotFrames or {}) do others[#others + 1] = f end
+    for _, f in pairs(others) do
+      local bottom, low = f and f:IsShown() and f:GetBottom(), lowest:GetBottom()
+      if bottom and low and bottom < low then lowest = f end
+    end
+  end)
+  if not ok then lowest = reagents end
+  local x = 0
+  if lowest ~= reagents then
+    local a, b = reagents.GetLeft and reagents:GetLeft(), lowest.GetLeft and lowest:GetLeft()
+    if a and b then x = a - b end
+  end
+  return lowest, x
+end
+
 local retailLine = nil
+local retailForm = nil
+local function placeRetailLine()
+  if not retailLine or not retailForm then return end
+  local ok, anchor, x = pcall(NS.CraftLineAnchor, retailForm)
+  if not ok or not anchor then anchor, x = retailForm.Reagents or retailForm, 0 end
+  retailLine:ClearAllPoints()
+  retailLine:SetPoint("TOPLEFT", anchor, "BOTTOMLEFT", x, -8)
+end
+
+-- Auctionator shows and hides its block as recipes change, possibly after the form's Init that
+-- places this line, so the line moves again whenever it does. Hooked once, under pcall.
+local blockHooked = false
+local function followAuctionator(form)
+  local block = _G[AUCTIONATOR_BLOCK]
+  if blockHooked or not block or not block.HookScript or block:GetParent() ~= form then return end
+  blockHooked = true
+  local again = function() pcall(placeRetailLine) end
+  block:HookScript("OnShow", again)
+  block:HookScript("OnHide", again)
+end
+
 local function describeRetail(form, recipeInfo)
   if not NS.Setting("crafting") or not recipeInfo or not recipeInfo.recipeID then
     if retailLine then retailLine:SetText("") end
@@ -382,8 +434,13 @@ local function describeRetail(form, recipeInfo)
     retailLine = form:CreateFontString("AHledgerCraftLineRetail", "OVERLAY", "GameFontNormalSmall")
     retailLine:SetJustifyH("LEFT")
     retailLine:SetWidth(300)
-    retailLine:SetPoint("TOPLEFT", form.Reagents or form, "BOTTOMLEFT", 0, -8)
   end
+  retailForm = form
+  pcall(followAuctionator, form)
+  placeRetailLine()
+  -- The optional reagent rows are laid out with the form, so which block is lowest is only
+  -- certain a frame later; look again then.
+  if C_Timer and C_Timer.After then C_Timer.After(0, function() pcall(placeRetailLine) end) end
   line = retailLine
   showLine(recipe)
 end

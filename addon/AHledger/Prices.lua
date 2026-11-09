@@ -196,13 +196,16 @@ function NS.UseOwnScan(scan, sync)
     overlayDone(scan, market, NS.SummarizeScan(scan.data, history))
     return true
   end
-  local job = { scan = scan, market = market, history = history, byItem = {}, next = scan.data:gmatch(LISTING) }
+  -- Sliced by time (NS.NewSlicer, 0.13.3): the fixed counts are only for a client without a clock.
+  local job = { scan = scan, market = market, history = history, byItem = {}, next = scan.data:gmatch(LISTING), slicer = NS.NewSlicer() }
   building = job
   local function step()
     if building ~= job then return end -- a newer scan took over
     local ok, err = pcall(function()
+      local slicer = job.slicer
       if job.next then
-        for _ = 1, ENTRIES_PER_STEP do
+        slicer:Begin(ENTRIES_PER_STEP)
+        while slicer:More() do
           local id, stack, buyout, bid = job.next()
           if not id then
             job.next = nil
@@ -212,15 +215,20 @@ function NS.UseOwnScan(scan, sync)
           end
           addListing(job.byItem, job.history, id, stack, buyout, bid)
         end
+        slicer:End()
       else
-        local stop = math.min(job.i + ITEMS_PER_STEP, #job.ids)
-        for i = job.i + 1, stop do
+        -- A row here sorts one item's prices, heavier than a listing: read the clock every item.
+        slicer:Begin(ITEMS_PER_STEP, 1)
+        local i, total = job.i, #job.ids
+        while i < total and slicer:More() do
+          i = i + 1
           local id = job.ids[i]
           job.items[id] = summarize(job.byItem[id])
           job.byItem[id] = nil
         end
-        job.i = stop
-        if stop >= #job.ids then overlayDone(job.scan, job.market, job.items) return end
+        job.i = i
+        slicer:End()
+        if i >= total then overlayDone(job.scan, job.market, job.items) return end
       end
       C_Timer.After(0, step)
     end)

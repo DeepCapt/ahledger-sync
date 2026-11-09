@@ -323,11 +323,21 @@ function NS.UndercutText(rows)
 end
 
 local saidThisVisit = false
+local houseOpen = false
 tab.undercut = {}
 
 function NS.CheckUndercuts(say)
+  -- The scan's lowest prices are read across frames when they are not kept yet (Deals.lua), and
+  -- the check runs again once they are; the list of your auctions is read then, not now.
+  local scan = NS.LatestLocalScan and NS.LatestLocalScan() or nil
+  if scan and NS.ScanMinimaReady and not NS.ScanMinimaReady(scan) and NS.WithScanMinima then
+    -- One waiting check, however often the owner list updates meanwhile. It speaks only if the
+    -- house is still open when the read ends.
+    NS.WithScanMinima(scan, function() pcall(NS.CheckUndercuts, say and houseOpen) end, "undercuts")
+    return tab.undercut
+  end
   local owned = NS.OwnedAuctions()
-  local minima = NS.ScanMinima and NS.ScanMinima(NS.LatestLocalScan and NS.LatestLocalScan() or nil) or {}
+  local minima = NS.ScanMinima and NS.ScanMinima(scan) or {}
   tab.undercut = NS.UndercutRows(owned, minima)
   if say and NS.Setting("undercutCheck") and not saidThisVisit then
     local line = NS.UndercutText(tab.undercut)
@@ -456,9 +466,11 @@ end
 events:SetScript("OnEvent", function(_, event)
   if event == "AUCTION_HOUSE_SHOW" then
     saidThisVisit = false
+    houseOpen = true
     NS.HookLedger()
   elseif event == "AUCTION_HOUSE_CLOSED" then
     saidThisVisit = false
+    houseOpen = false
   elseif event == "OWNED_AUCTIONS_UPDATED" or event == "AUCTION_OWNED_LIST_UPDATE" then
     pcall(NS.CheckUndercuts, true)
   elseif event == "MAIL_SHOW" then

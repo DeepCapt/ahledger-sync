@@ -28,22 +28,111 @@ function NS.LatestLocalScan()
 end
 
 -- Lowest unit buyout and the quantity available at that price, per item, from a scan string.
-function NS.ScanMinima(scan)
-  local minima = {}
-  if not scan or type(scan.data) ~= "string" then return minima end
-  for id, stack, buyout in scan.data:gmatch("(%d+):(%d+):(%d+):%d+:%d+") do
-    id, stack, buyout = tonumber(id), tonumber(stack), tonumber(buyout)
-    if buyout > 0 and stack > 0 then
-      local unit = buyout / stack
-      local m = minima[id]
-      if not m or unit < m.unit - 0.5 then
-        minima[id] = { unit = unit, qty = stack }
-      elseif math.abs(unit - m.unit) <= 0.5 then
-        m.qty = m.qty + stack
-      end
+--
+-- A full house is 150,000 listings or more, and reading them all in one frame stalled the client
+-- right after every scan (the deal line in chat and the bar both asked at once). Since 0.13.3 the
+-- result is kept per scan (a stored scan's text never changes), and WithScanMinima reads a scan
+-- across frames, a time slice each, calling back when done. ScanMinima itself still reads at once
+-- when nothing is kept: the Deals tab and the harness ask for an answer now.
+local LISTING_MINIMUM = "(%d+):(%d+):(%d+):%d+:%d+"
+local MINIMA_PER_STEP = 4000 -- listings a frame, when there is no clock (see Frame slices)
+local minimaFor = setmetatable({}, { __mode = "k" }) -- scan table -> minima, once read
+local minimaJob = nil -- { scan, minima, next, slicer, callbacks, keys } while a scan is read across frames
+
+-- Runs the callbacks of a finished read, each under pcall; an error is noted for /ahl status.
+local function runCallbacks(job, minima)
+  for _, fn in ipairs(job.callbacks) do
+    local ok, err = pcall(fn, minima)
+    if not ok and NS.NoteError then NS.NoteError("scan minima callback", err) end
+  end
+end
+
+local function addMinimum(minima, id, stack, buyout)
+  id, stack, buyout = tonumber(id), tonumber(stack), tonumber(buyout)
+  if buyout > 0 and stack > 0 then
+    local unit = buyout / stack
+    local m = minima[id]
+    if not m or unit < m.unit - 0.5 then
+      minima[id] = { unit = unit, qty = stack }
+    elseif math.abs(unit - m.unit) <= 0.5 then
+      m.qty = m.qty + stack
     end
   end
+end
+
+function NS.ScanMinima(scan)
+  if not scan or type(scan.data) ~= "string" then return {} end
+  local kept = minimaFor[scan]
+  if kept then return kept end
+  local minima = {}
+  for id, stack, buyout in scan.data:gmatch(LISTING_MINIMUM) do addMinimum(minima, id, stack, buyout) end
+  minimaFor[scan] = minima
+  if minimaJob and minimaJob.scan == scan then
+    -- Read at once while a slow read of the same scan was under way: that one is done too.
+    local job = minimaJob
+    minimaJob = nil
+    runCallbacks(job, minima)
+  end
   return minima
+end
+
+-- True when the scan's minima are kept, so ScanMinima answers without reading.
+function NS.ScanMinimaReady(scan)
+  return scan ~= nil and minimaFor[scan] ~= nil
+end
+
+-- Calls fn(minima) for the scan: at once when they are kept (returns true), otherwise after
+-- reading the scan across frames (returns false). A newer scan's read replaces an older one's,
+-- whose callbacks are dropped: what they would show is already out of date. With a `key`, a
+-- callback already waiting under that key is not added again: the bar redraws every few seconds
+-- while a read runs, and each redraw waiting its turn would all run in the frame the read ends.
+function NS.WithScanMinima(scan, fn, key)
+  if not scan or type(scan.data) ~= "string" then
+    fn({})
+    return true
+  end
+  if minimaFor[scan] or not (C_Timer and C_Timer.After) then
+    fn(NS.ScanMinima(scan))
+    return true
+  end
+  if minimaJob and minimaJob.scan == scan then
+    if key then
+      if minimaJob.keys[key] then return false end
+      minimaJob.keys[key] = true
+    end
+    minimaJob.callbacks[#minimaJob.callbacks + 1] = fn
+    return false
+  end
+  local job = { scan = scan, minima = {}, next = scan.data:gmatch(LISTING_MINIMUM), slicer = NS.NewSlicer(), callbacks = { fn }, keys = {} }
+  if key then job.keys[key] = true end
+  minimaJob = job
+  local function step()
+    if minimaJob ~= job then return end
+    local ok, err = pcall(function()
+      local slicer, minima, nextListing = job.slicer, job.minima, job.next
+      slicer:Begin(MINIMA_PER_STEP)
+      local done = false
+      while slicer:More() do
+        local id, stack, buyout = nextListing()
+        if not id then done = true break end
+        addMinimum(minima, id, stack, buyout)
+      end
+      slicer:End()
+      if done then
+        minimaJob = nil
+        minimaFor[job.scan] = minima
+        runCallbacks(job, minima)
+      else
+        C_Timer.After(0, step)
+      end
+    end)
+    if not ok then
+      if minimaJob == job then minimaJob = nil end
+      if NS.NoteError then NS.NoteError("scan minima", err) end
+    end
+  end
+  C_Timer.After(0, step)
+  return false
 end
 
 -- Rows for the deals list: items under (100 - pct)% of their 30 day median, biggest savings first.
@@ -102,6 +191,11 @@ function NS.DealSummary()
     tostring(NS.Setting("dealsPercent") or 30), tostring(NS.Setting("dealsMinValue") or 100),
   }, "|")
   if summary.key ~= key then
+    -- Never read a whole scan for the bar: once it has been read across frames, redraw.
+    if not NS.ScanMinimaReady(scan) then
+      NS.WithScanMinima(scan, function() if NS.RefreshBar then NS.RefreshBar() end end, "bar")
+      return summary.key and summary or nil
+    end
     local rows = NS.ComputeDeals()
     -- selling: how many of them sell at least one a day, for the bar ("Deals 9 (6 sell)").
     summary = { key = key, n = #rows, selling = #NS.SellingDeals(rows), top = { rows[1], rows[2], rows[3] }, scan = scan }
@@ -130,6 +224,12 @@ local function refresh()
   local minValue = NS.Setting("dealsMinValue") or 100
   tab.pctBox:SetText(tostring(pct))
   tab.minBox:SetText(UI.PlainGold(minValue))
+  local latest = NS.LatestLocalScan()
+  if latest and not NS.ScanMinimaReady(latest) then
+    tab.status:SetText(UI.GREY .. "Reading your scan..." .. UI.R)
+    NS.WithScanMinima(latest, function() if NS.WindowShowing and NS.WindowShowing("deals") then refresh() end end, "deals tab")
+    return
+  end
   local rows, scan = NS.ComputeDeals(pct, minValue)
   local selling = NS.Setting("dealsSelling") and true or false
   tab.sellingBox:SetChecked(selling)
