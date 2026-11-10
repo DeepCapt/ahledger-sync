@@ -388,7 +388,7 @@ function NS.ResultColumnText(itemID, price, bare)
 end
 
 -- Custom fields on Blizzard frames are read with rawget so a frame metatable cannot answer.
--- Used by the Classic list, which has no table builder; the modern list gets a real column.
+-- Used by the Classic list, which has no table builder; the modern list is drawn below.
 local function decorate(frame, itemID, price)
   local fs = rawget(frame, "AHledgerText")
   if not fs then
@@ -402,90 +402,141 @@ local function decorate(frame, itemID, price)
 end
 
 -- ---------------------------------------------------------------------------------------------
--- The Median column on the modern browse list
+-- The median on the modern browse list
 --
 -- The Forever client builds the browse list with Blizzard's table builder: Price, Name (which
--- stretches to fill), an optional level column, Available, and the favourite star. Up to 0.5.4
--- the addon drew its text over the row's right edge, on top of Available and iLvl. Now it
--- adds a column of its own through the same builder, placed after Name, so the name column
--- gives up the space and nothing overlaps at any window width. The cell template is in
--- AHledger.xml; this mixin fills it. The list's layout function is wrapped rather than
--- replaced, so whatever Blizzard's layout does on this build is kept as is.
+-- stretches to fill), an optional level column, Available, and the favourite star. From 0.6.0
+-- to 0.13.3 the addon added a real Median column by wrapping the list's layout function. That
+-- put an addon function inside Blizzard's own path: AuctionHouseItemListMixin calls the layout
+-- function directly while the auction house opens, OpenAllBags runs in the same call, and the
+-- bags then registered their gamepad bindings tainted. With gamepad mode on, every window
+-- opened or closed afterwards was blocked ("AHledger has been blocked from an action only
+-- available to the Blizzard UI: SetPreferredGamepadInteractTarget()") until a reload.
+--
+-- Rule: never call SetTableBuilderLayout, never add a column, never hand this list a function,
+-- template or mixin of ours to run. The text is drawn after a row is built instead, from
+-- hooksecurefunc post-hooks on the list's table builder (AddRow, plus Arrange, which rebuilds
+-- the cells of rows already shown). Post-hooks run after Blizzard's code has returned, so they
+-- cannot taint it. The text sits at the right end of the Name cell and the name's right edge
+-- (and Blizzard's own truncation text, ExtraInfo) moves left of it, so a long name shortens
+-- instead of running under the price. Cells come from a shared pool: every cell whose anchors
+-- we moved is put back as the template had them when its row goes or the layout is reset.
+-- Bookkeeping lives in weak tables here, not in fields on Blizzard's frames.
 -- ---------------------------------------------------------------------------------------------
 
--- A cell must answer everything the row asks of Blizzard's cells: the row calls OnLineEnter
--- and OnLineLeave on every cell when the pointer crosses it, and a cell without them threw
--- "attempt to call a nil value" from TableBuilder.lua (0.6.0). Derive from Blizzard's cell
--- mixin where it exists and define the two anyway.
-AHledgerMedianCellMixin = (CreateFromMixins and TableBuilderCellMixin) and CreateFromMixins(TableBuilderCellMixin) or {}
+local medianText = setmetatable({}, { __mode = "k" }) -- row -> our FontString
+local touched = setmetatable({}, { __mode = "k" }) -- cell -> the row whose text it now ends at
+local MEDIAN_GAP = 8
+local browseBuilder = nil
 
-function AHledgerMedianCellMixin:Init(owner)
-  self.owner = owner
+-- The Name cell of a built row: the one carrying the item text and Blizzard's truncation text.
+function NS.BrowseNameCell(row)
+  local cells = type(row) == "table" and rawget(row, "cells")
+  if type(cells) ~= "table" then return nil end
+  for _, cell in ipairs(cells) do
+    if type(cell) == "table" and rawget(cell, "Text") and rawget(cell, "ExtraInfo") then return cell end
+  end
+  return nil
 end
 
-function AHledgerMedianCellMixin:OnLineEnter() end
-function AHledgerMedianCellMixin:OnLineLeave() end
-
-function AHledgerMedianCellMixin:Populate(rowData)
-  local key = rowData and rowData.itemKey
-  local itemID = key and key.itemID
-  self.Text:SetText(itemID and NS.ResultColumnText(itemID, rowData.minPrice, true) or "")
+local function truncate(cell)
+  if cell.HandleItemNameTruncation then pcall(cell.HandleItemNameTruncation, cell) end
 end
 
-local MEDIAN_COLUMN_WIDTH = 132
-local MEDIAN_COLUMN_AFTER = 2 -- Price, Name, then ours
-
--- Moves the column just added (the last one) to sit after the Name column. Pure, for the
--- harness: takes the builder's column list and returns it.
-function NS.PlaceMedianColumn(columns)
-  local n = #columns
-  if n <= MEDIAN_COLUMN_AFTER + 1 then return columns end
-  local ours = table.remove(columns, n)
-  table.insert(columns, MEDIAN_COLUMN_AFTER + 1, ours)
-  return columns
+-- Puts a cell's name back to the template's anchors, if we moved them (for `row`, when given).
+local function restoreCell(cell, row)
+  local owner = touched[cell]
+  if not owner or (row and owner ~= row) then return end
+  touched[cell] = nil
+  rawget(cell, "Text"):SetPoint("RIGHT", cell, "RIGHT", 1, 0)
+  rawget(cell, "ExtraInfo"):SetPoint("RIGHT", cell, "RIGHT", 1, 0)
+  truncate(cell)
 end
 
-local function medianLayout(list, original)
-  return function(tableBuilder)
-    original(tableBuilder)
-    if not NS.Setting("ahColumn") then return end
-    if not tableBuilder.AddUnsortableFixedWidthColumn or not tableBuilder.GetColumns then return end
-    local owner = AuctionHouseFrame.BrowseResultsFrame
-    local header = NS.MedianHeaderText and NS.MedianHeaderText() or "Median"
-    tableBuilder:AddUnsortableFixedWidthColumn(owner, 0, MEDIAN_COLUMN_WIDTH, 10, 0, header, "AHledgerMedianCellTemplate")
-    NS.PlaceMedianColumn(tableBuilder:GetColumns())
+local function clearRow(row)
+  local fs = medianText[row]
+  if fs then
+    fs:SetText("")
+    fs:Hide()
   end
 end
 
--- Wraps the layout the browse list currently holds, once, and re-applies it. Called when the
--- auction house UI loads and again whenever Blizzard sets a new layout on the list.
-local function installMedianColumn(list)
-  if not list or not list.SetTableBuilderLayout then return end
-  local current = rawget(list, "tableBuilderLayoutFunction")
-  if not current or current == rawget(list, "AHledgerLayout") then return end
-  local wrapped = medianLayout(list, current)
-  list.AHledgerLayout = wrapped
-  list:SetTableBuilderLayout(wrapped)
+local function decorateRow(row)
+  local cell = NS.BrowseNameCell(row)
+  local data = rawget(row, "rowData")
+  local key = type(data) == "table" and data.itemKey
+  local text = ""
+  if cell and NS.Setting("ahColumn") and type(key) == "table" and key.itemID then
+    text = NS.ResultColumnText(key.itemID, data.minPrice, true)
+  end
+  if text == "" then
+    clearRow(row)
+    if cell then restoreCell(cell) end
+    return
+  end
+  local fs = medianText[row]
+  if not fs then
+    fs = row:CreateFontString(nil, "OVERLAY", "Number14FontWhite")
+    fs:SetJustifyH("RIGHT")
+    fs:SetTextColor(0.7, 0.7, 0.72)
+    medianText[row] = fs
+  end
+  fs:ClearAllPoints()
+  fs:SetPoint("RIGHT", cell, "RIGHT", 0, 0)
+  fs:SetText(text)
+  fs:Show()
+  rawget(cell, "Text"):SetPoint("RIGHT", fs, "LEFT", -MEDIAN_GAP, 0)
+  rawget(cell, "ExtraInfo"):SetPoint("RIGHT", fs, "LEFT", -MEDIAN_GAP, 0)
+  touched[cell] = row
+  truncate(cell)
 end
 
--- Rebuilds the column after the option is flipped, without a reload.
+local function undecorateRow(row)
+  clearRow(row)
+  for cell, owner in pairs(touched) do
+    if owner == row then restoreCell(cell, row) end
+  end
+end
+
+local function restoreAll()
+  for cell in pairs(touched) do restoreCell(cell) end
+end
+
+local function sweep(tb)
+  local rows = tb and rawget(tb, "rows")
+  if type(rows) ~= "table" then return end
+  for _, row in ipairs(rows) do pcall(decorateRow, row) end
+end
+
+local function hookBrowseBuilder(tb)
+  if hooked.browseBuilder or type(tb) ~= "table" or not tb.AddRow then return end
+  hooked.browseBuilder = true
+  browseBuilder = tb
+  hooksecurefunc(tb, "AddRow", function(_, row) pcall(decorateRow, row) end)
+  if tb.RemoveRow then hooksecurefunc(tb, "RemoveRow", function(_, row) pcall(undecorateRow, row) end) end
+  if tb.Reset then hooksecurefunc(tb, "Reset", function() pcall(restoreAll) end) end
+  if tb.Arrange then hooksecurefunc(tb, "Arrange", function(self) pcall(sweep, self) end) end
+  sweep(tb)
+end
+
+-- Redraws the rows on screen after the option is flipped, without a reload.
 function NS.RefreshMedianColumn()
-  local browse = AuctionHouseFrame and AuctionHouseFrame.BrowseResultsFrame
-  local list = browse and browse.ItemList
-  if not list or not rawget(list, "AHledgerLayout") then return end
-  list:SetTableBuilderLayout(list.AHledgerLayout)
+  if browseBuilder then sweep(browseBuilder) end
 end
 
 local function hookModernBrowse()
   if not AuctionHouseFrame or hooked.modernBrowse then return end
-  hooked.modernBrowse = true
   guard("results column", function()
     local browse = AuctionHouseFrame.BrowseResultsFrame
-    local list = browse and browse.ItemList
-    if not list then return end
-    installMedianColumn(list)
-    if browse.SetupTableBuilder then
-      hooksecurefunc(browse, "SetupTableBuilder", function(self) installMedianColumn(self.ItemList) end)
+    local list = type(browse) == "table" and rawget(browse, "ItemList")
+    if type(list) ~= "table" then return end
+    hooked.modernBrowse = true
+    local tb = rawget(list, "tableBuilder")
+    if tb then
+      hookBrowseBuilder(tb)
+    elseif list.Init then
+      -- The list makes its table builder in Init, the first time it is shown.
+      hooksecurefunc(list, "Init", function(self) pcall(hookBrowseBuilder, rawget(self, "tableBuilder")) end)
     end
   end)
 end
