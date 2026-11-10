@@ -128,7 +128,7 @@ interface RefreshResult {
   pvpError?: string | null;
 }
 
-const VERSION = '0.2.27';
+const VERSION = '0.2.28';
 /** Where the saved-variables file sits, written the way this system writes paths. */
 const PATH_EXAMPLE = /Macintosh|Mac OS X/.test(navigator.userAgent)
   ? '/Applications/World of Warcraft/…/WTF/Account/ACCOUNT/SavedVariables/AHledger.lua'

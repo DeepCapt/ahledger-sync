@@ -1005,6 +1005,7 @@ async fn refresh_price_tables(
     let base = settings.api_url.trim_end_matches('/').to_string();
     let client = reqwest::Client::builder()
         .user_agent(format!("AHledger-sync/{}", env!("CARGO_PKG_VERSION")))
+        .default_headers(sync_key_headers(&settings.key_id))
         .timeout(Duration::from_secs(60))
         .build()
         .map_err(err)?;
@@ -1027,17 +1028,12 @@ async fn refresh_price_tables(
     let mut count_items = 0usize;
     let mut newest = 0u64;
     for m in markets.markets.iter().filter(|m| m.game == settings.game) {
-        let text = client
-            .get(format!("{base}/v1/pricetable/{}", m.id))
-            .send()
-            .await
-            .map_err(err)?
-            .error_for_status()
-            .map_err(err)?
-            .text()
-            .await
-            .map_err(err)?;
-        let Some((lua, rows, updated)) = render_price_table(&m.id, &text)? else { continue };
+        let fetched = fetch_price_table(&app, &client, &base, &m.id).await?;
+        let Some((lua, rows, updated)) = render_price_table(&m.id, &fetched.text)? else { continue };
+        // Kept only once it reads, so a bad table never replaces the last good one.
+        if let Some(tag) = fetched.new_etag.as_deref() {
+            keep_price_table(&app, &m.id, &fetched.text, tag);
+        }
         out.push_str(&lua);
         count_markets += 1;
         count_items += rows;
@@ -1090,6 +1086,106 @@ async fn refresh_price_tables(
         pvp: pvp_rows,
         pvp_error,
     })
+}
+
+/// The upload key's public id, sent with the table downloads (0.2.28) so the API can count sync
+/// apart from sites that copy the tables. Never the secret, and nothing when no key is set. The
+/// API changes no limit for it.
+fn sync_key_headers(key_id: &str) -> reqwest::header::HeaderMap {
+    let mut headers = reqwest::header::HeaderMap::new();
+    let plain = key_id.len() == 20
+        && key_id.starts_with("ahl_")
+        && key_id[4..].chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit());
+    if plain {
+        if let Ok(v) = reqwest::header::HeaderValue::from_str(key_id) {
+            headers.insert("x-ahl-sync-key", v);
+        }
+    }
+    headers
+}
+
+/// A market's price table as fetched, and the ETag to keep it under when it came from the server.
+struct FetchedTable {
+    text: String,
+    /// Set for a fresh download that carried an ETag; None for the kept copy.
+    new_etag: Option<String>,
+}
+
+/// The file name a market's kept price table goes under, or None for an id that is not plainly a
+/// market id (letters, digits, dots and dashes), which is then never cached: the id comes from the
+/// server and must not be able to name a path.
+fn price_table_cache_name(market_id: &str) -> Option<String> {
+    let plain = !market_id.is_empty()
+        && market_id.len() <= 200
+        && !market_id.starts_with('.')
+        && !market_id.contains("..")
+        && market_id
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'.' || b == b'-');
+    plain.then(|| market_id.to_string())
+}
+
+fn price_table_paths(app: &AppHandle, market_id: &str) -> Option<(PathBuf, PathBuf, PathBuf)> {
+    let name = price_table_cache_name(market_id)?;
+    let dir = app.path().app_data_dir().ok()?.join("pricetables");
+    let text = dir.join(format!("{name}.txt"));
+    let etag = dir.join(format!("{name}.etag"));
+    Some((dir, text, etag))
+}
+
+/// One market's price table (0.2.28). The last good table is kept in the app's data folder with
+/// its ETag and sent back as If-None-Match, so a refresh that finds nothing new is answered 304,
+/// costs a few bytes and never counts toward the server's hourly cap on full downloads. A failed
+/// download (a 429 from a busy shared address, a dropped connection) uses the kept table instead
+/// of failing the whole refresh; with nothing kept the error stands, as before.
+async fn fetch_price_table(
+    app: &AppHandle,
+    client: &reqwest::Client,
+    base: &str,
+    market_id: &str,
+) -> Result<FetchedTable, String> {
+    let paths = price_table_paths(app, market_id);
+    let cached = paths.as_ref().and_then(|(_, t, _)| fs::read_to_string(t).ok());
+    let etag = paths.as_ref().and_then(|(_, _, e)| fs::read_to_string(e).ok());
+    let kept = |problem: String| match cached.clone() {
+        Some(text) => Ok(FetchedTable { text, new_etag: None }),
+        None => Err(problem),
+    };
+    let mut req = client.get(format!("{base}/v1/pricetable/{market_id}"));
+    if let (Some(tag), Some(_)) = (etag.as_deref(), cached.as_ref()) {
+        req = req.header("if-none-match", tag.trim());
+    }
+    let res = match req.send().await {
+        Ok(r) => r,
+        Err(e) => return kept(err(e)),
+    };
+    let status = res.status().as_u16();
+    if status == 304 {
+        return kept(format!("the server answered 304 for {market_id} but no table is kept"));
+    }
+    if !(200..300).contains(&status) {
+        return kept(format!("HTTP {status} for the {market_id} price table"));
+    }
+    let new_etag = res
+        .headers()
+        .get("etag")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    match res.text().await {
+        Ok(text) => Ok(FetchedTable { text, new_etag }),
+        Err(e) => kept(err(e)),
+    }
+}
+
+/// Keeps a price table that read cleanly, with its ETag, for the next refresh.
+fn keep_price_table(app: &AppHandle, market_id: &str, text: &str, etag: &str) {
+    let Some((dir, text_path, etag_path)) = price_table_paths(app, market_id) else { return };
+    let _ = fs::create_dir_all(&dir);
+    // The ETag goes last and only after the table, so a half-written pair never sends a tag
+    // for a table that is not on disk.
+    if fs::write(&text_path, text).is_ok() {
+        let _ = fs::write(&etag_path, etag);
+    }
 }
 
 /// The PvP table for a region, as the Lua block and its row count, with why it could not be
@@ -1307,6 +1403,28 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn table_downloads_carry_only_a_plain_upload_key_id() {
+        use super::sync_key_headers;
+        let h = sync_key_headers("ahl_abcdefghij012345");
+        assert_eq!(h.get("x-ahl-sync-key").unwrap(), "ahl_abcdefghij012345");
+        assert_eq!(h.len(), 1);
+        for bad in ["", "ahl_short", "ahl_ABCDEFGHIJ012345", "xyz_abcdefghij012345", "ahl_abcdefghij01234
+"] {
+            assert!(sync_key_headers(bad).is_empty(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn only_a_plain_market_id_names_a_kept_price_table() {
+        use super::price_table_cache_name as name;
+        assert_eq!(name("forever.pvp.horde.us").as_deref(), Some("forever.pvp.horde.us"));
+        assert_eq!(name("forever.rp-pvp.alliance.eu").as_deref(), Some("forever.rp-pvp.alliance.eu"));
+        for bad in ["", "../x", "a/b", "a\\b", ".hidden", "a..b", "Forever.pvp", "a:b", "x y"] {
+            assert_eq!(name(bad), None, "{bad}");
+        }
+    }
+
     #[test]
     fn a_clock_refusal_teaches_the_correction() {
         use super::clock_correction;
