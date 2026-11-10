@@ -17,7 +17,7 @@
 ]]
 
 local ADDON_NAME, NS = ...
-NS.VERSION = "0.13.4"
+NS.VERSION = "0.14.0"
 
 local MAX_SCANS_PER_MARKET = 3 -- newest scans kept per realm+faction (about 1 MB each at 50k listings)
 local MAX_SCANS_TOTAL = 12 -- hard ceiling on the SavedVariables file across every realm and faction

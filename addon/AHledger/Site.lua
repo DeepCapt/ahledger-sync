@@ -49,20 +49,15 @@ function NS.ShowItemLink(itemID, name)
   return NS.ShowLink(label .. " on ahledger.com", NS.ItemURL(itemID))
 end
 
---- /ahl link [item]: a shift-clicked link, an item id, or a name the client has cached.
+--- /ahl link [item]: a shift-clicked link, an item id, or its name or part of it (0.14.0).
 function NS.LinkCommand(arg)
   arg = arg or ""
-  local id = NS.ItemIdFromLink(arg) or tonumber(arg:match("^%s*(%d+)%s*$") or "")
-  if not id and arg:match("%S") and GetItemInfo then
-    local _, link = GetItemInfo(arg)
-    id = link and NS.ItemIdFromLink(link) or nil
+  if not arg:match("%S") then
+    return NS.ShowLink("AHledger: prices, deals and history for your auction house", NS.SITE)
   end
-  if id then return NS.ShowItemLink(id) end
-  if arg:match("%S") then
-    NS.Print("no item called " .. arg .. " is in your game cache yet; shift-click its link into /ahl link instead")
-    return nil
-  end
-  return NS.ShowLink("AHledger: prices, deals and history for your auction house", NS.SITE)
+  local id, name = NS.FindItemForChat(arg, "")
+  if id then return NS.ShowItemLink(id, name) end
+  return nil
 end
 
 -- The weekly report goes out on Tuesdays at 15:00 UTC (the site's Ledger job). Epoch arithmetic

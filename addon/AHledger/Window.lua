@@ -87,14 +87,9 @@ local function marketMenu()
   UI.Menu(window.marketButton, entries)
 end
 
-local function lookup()
-  local id, name = NS.ItemFrom(window.lookupBox:GetText())
-  if not id then
-    window.lookupText:SetText(UI.GREY .. "Type an item name you have seen, or shift-click a link into the box" .. UI.R)
-    window.lookupId = nil
-    return
-  end
-  window.lookupId = id
+local function showLookup(id, name)
+  name = name or ("item " .. id)
+  window.lookupId, window.lookupName = id, name
   local _, link = GetItemInfo(id)
   local p = NS.Price(id, NS.Market())
   if p then
@@ -103,6 +98,33 @@ local function lookup()
   else
     window.lookupText:SetText((link or name) .. "  " .. UI.GREY .. "not listed on " .. NS.MarketLabel(NS.Market()) .. UI.R)
   end
+end
+
+-- Prices what the box holds (0.14.0: part of a name is enough). Text that fits several items
+-- lists them under the box; picking one calls onPick, which prices it unless told otherwise.
+local function lookup(onPick, verb)
+  UI.HideMenu()
+  local text = window.lookupBox:GetText()
+  local market = NS.Market()
+  local id, a, total = NS.FindItem(text, market)
+  if id then
+    showLookup(id, a)
+    if onPick then onPick(id, a) end
+    return
+  end
+  window.lookupId, window.lookupName = nil, nil
+  if (total or 0) == 0 then
+    window.lookupText:SetText(UI.GREY .. NS.NoMatchText(text) .. UI.R)
+    return
+  end
+  window.lookupText:SetText(NS.ManyMatchText(text, #a, total, verb))
+  -- Under the line that explains it, not over it; it stays open until a pick, Escape or typing.
+  UI.Menu(window.lookupText, NS.MatchEntries(a, market, function(pid, pname)
+    window.lookupBox:SetText(pname)
+    window.lookupBox:ClearFocus()
+    showLookup(pid, pname)
+    if onPick then onPick(pid, pname) end
+  end), 380, true)
 end
 
 -- ---------------------------------------------------------------------------------------------
@@ -157,6 +179,8 @@ end
 
 local function showTab(key)
   current = key
+  -- A list of matches belongs to the box it opened under, which may be on the tab being left.
+  UI.HideMenu()
   for _, t in ipairs(NS.Tabs) do
     local body = window.bodies[t.key]
     if t.key == key then
@@ -219,19 +243,23 @@ local function ensureWindow()
   ageHover:SetScript("OnLeave", function() if GameTooltip and not GameTooltip:IsForbidden() then GameTooltip:Hide() end end)
 
   UI.Label(window, "Look up", "GameFontNormalSmall", 16, -48, 50)
-  window.lookupBox = UI.EditBox(window, 220, 72, -44, lookup)
-  local lookupButton = UI.Button(window, "Price", 60, lookup)
+  window.lookupBox = UI.EditBox(window, 220, 72, -44, function() lookup() end)
+  -- Typing again closes a list of matches for the old text.
+  window.lookupBox:HookScript("OnTextChanged", function(_, userInput) if userInput then UI.HideMenu() end end)
+  window.lookupBox:HookScript("OnEscapePressed", function() UI.HideMenu() end)
+  local lookupButton = UI.Button(window, "Price", 60, function() lookup() end)
   lookupButton:SetPoint("TOPLEFT", 298, -43)
   local watchButton = UI.Button(window, "Watch", 60, function()
-    lookup()
-    if window.lookupId then
-      NS.WatchAdd(window.lookupId, (GetItemInfo(window.lookupId)))
+    lookup(function(id, name)
+      NS.WatchAdd(id, name)
       showTab("watch")
-    end
+    end, "watch")
   end)
   watchButton:SetPoint("TOPLEFT", 362, -43)
+  window.watchButton = watchButton
   window.lookupText = UI.Label(window, "", "GameFontHighlightSmall", 16, -70, 668)
   window.lookupText:SetWordWrap(false)
+  window.lookupText:SetText(UI.GREY .. NS.NoMatchText("") .. UI.R)
 
   -- Shift-clicking an item while a box in the window has focus drops the link into it.
   if ChatEdit_InsertLink and hooksecurefunc then
@@ -239,7 +267,11 @@ local function ensureWindow()
       if type(link) ~= "string" then return end
       local boxes = { window.lookupBox, NS.WatchTab and NS.WatchTab.addBox }
       for _, box in ipairs(boxes) do
-        if box and box.HasFocus and box:HasFocus() then box:SetText(link) end
+        if box and box.HasFocus and box:HasFocus() then
+          -- A list of matches is for the text the link replaces.
+          UI.HideMenu()
+          box:SetText(link)
+        end
       end
     end)
   end

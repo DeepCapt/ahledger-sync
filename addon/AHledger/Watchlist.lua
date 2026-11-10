@@ -33,22 +33,7 @@ local function saveWatch()
   if NS.PersistSave then NS.PersistSave() end
 end
 
--- Item from a link, an item id, or a cached item name.
-function NS.ItemFrom(arg)
-  arg = (arg or ""):gsub("^%s+", ""):gsub("%s+$", "")
-  if arg == "" then return nil end
-  local id = NS.ItemIdFromLink(arg)
-  if not id and arg:match("^%d+$") then id = tonumber(arg) end
-  if not id then
-    local _, link = GetItemInfo(arg)
-    id = link and NS.ItemIdFromLink(link) or nil
-  end
-  if id then
-    local name = GetItemInfo(id)
-    return id, name or arg:match("%[(.-)%]") or arg
-  end
-  return nil
-end
+-- Item from a link, an item id, or a whole cached name (Search.lua).
 local itemFrom = NS.ItemFrom
 
 local function linkFor(id)
@@ -228,7 +213,7 @@ local function build(parent)
       { key = "qty", label = "Listed", width = 50, numeric = true, justify = "RIGHT", format = function(v) return v and UI.Comma(v) or "" end },
       { key = "alert", label = "Alerts", width = 66 },
     },
-    empty = "Nothing watched yet. Shift-click an item into the box below and press Watch.",
+    empty = "Nothing watched yet. Type part of an item name in the box below, or shift-click an item into it, and press Watch.",
     siteLink = function()
       return { text = "Email alerts for your watchlist: " .. NS.SITE .. "/watchlist", title = "Your watchlist, with email alerts", url = NS.SITE .. "/watchlist" }
     end,
@@ -252,7 +237,7 @@ local function build(parent)
   tab.addBox = UI.EditBox(parent, 300, 66, y, function() tab.watchClicked() end)
   local watchButton = UI.Button(parent, "Watch", 70, function() tab.watchClicked() end)
   watchButton:SetPoint("TOPLEFT", 372, y + 1)
-  UI.Muted(parent, "shift-click an item link, or type its name", 450, y - 4, 220)
+  UI.Muted(parent, "part of a name, or shift-click a link", 450, y - 4, 220)
 
   y = y - 30
   UI.Label(parent, "Alerts", "GameFontNormalSmall", 0, y - 4, 60)
@@ -289,18 +274,29 @@ local function build(parent)
   tab.logText = UI.Label(parent, "", "GameFontHighlightSmall", 0, y - 16, 668)
   tab.logText:SetSpacing(2)
 
-  tab.watchClicked = function()
-    local id, name = itemFrom(tab.addBox:GetText())
-    if not id then
-      NS.Print("shift-click an item link into the box, or type the exact name of an item you have seen")
-      return
-    end
+  local function addWatched(id, name)
     NS.WatchAdd(id, name)
     tab.selected = id
     tab.addBox:SetText("")
     tab.addBox:ClearFocus()
     refresh()
   end
+  -- Part of a name is enough (0.14.0); text that fits several items lists them under the box.
+  tab.watchClicked = function()
+    UI.HideMenu()
+    local text = tab.addBox:GetText()
+    local market = NS.Market()
+    local id, a, total = NS.FindItem(text, market)
+    if id then return addWatched(id, a) end
+    if (total or 0) == 0 then
+      NS.Print(NS.NoMatchText(text))
+      return
+    end
+    NS.Print(NS.ManyMatchText(text, #a, total, "watch"))
+    UI.Menu(tab.addBox, NS.MatchEntries(a, market, addWatched), 380, true)
+  end
+  tab.addBox:HookScript("OnTextChanged", function(_, userInput) if userInput then UI.HideMenu() end end)
+  tab.addBox:HookScript("OnEscapePressed", function() UI.HideMenu() end)
   tab.setAlertsClicked = function()
     if not tab.selected then NS.Print("select an item in the list first") return end
     local w = watched()[tab.selected]
@@ -348,8 +344,8 @@ function NS.WatchCommand(arg)
   local sub, rest = (arg or ""):match("^(%S*)%s*(.-)$")
   sub = (sub or ""):lower()
   if sub == "add" then
-    local id, name = itemFrom(rest)
-    if not id then NS.Print("shift-click an item link: /ahl watch add [item]") return end
+    local id, name = NS.FindItemForChat(rest, "type part of an item name, or shift-click its link: /ahl watch add [item]")
+    if not id then return end
     NS.WatchAdd(id, name)
     NS.Print("watching " .. (name or id))
   elseif sub == "remove" or sub == "rm" then

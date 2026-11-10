@@ -346,7 +346,9 @@ end
 
 local menu = nil
 
-function UI.Menu(anchor, entries)
+-- A popup list under `anchor`; `width` defaults to 200 (the item matches take 380). A `sticky`
+-- list stays open when the mouse leaves it, closing on a pick or when its owner hides it.
+function UI.Menu(anchor, entries, width, sticky)
   if not menu then
     menu = CreateFrame("Frame", "AHledgerMenu", UIParent, "BackdropTemplate")
     menu:SetBackdrop({
@@ -359,25 +361,33 @@ function UI.Menu(anchor, entries)
     menu:EnableMouse(true)
     menu.buttons = {}
     menu:SetScript("OnLeave", function(self)
-      if not self:IsMouseOver() then self:Hide() end
+      if not self.sticky and not self:IsMouseOver() then self:Hide() end
     end)
   end
   for _, b in ipairs(menu.buttons) do b:Hide() end
-  local width = 200
+  menu.sticky = sticky and true or false
+  width = width or 200
   for i, e in ipairs(entries) do
     local b = menu.buttons[i]
     if not b then
       b = CreateFrame("Button", nil, menu)
       b:SetHeight(18)
       b.text = b:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+      -- An entry's `right` text (a price) sits at the right edge; a long name stops short of it.
+      b.right = b:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+      b.right:SetPoint("RIGHT", -8, 0)
+      b.right:SetJustifyH("RIGHT")
       b.text:SetPoint("LEFT", 10, 0)
+      b.text:SetPoint("RIGHT", b.right, "LEFT", -8, 0)
       b.text:SetJustifyH("LEFT")
+      b.text:SetWordWrap(false)
       b:SetHighlightTexture("Interface/QuestFrame/UI-QuestTitleHighlight", "ADD")
       menu.buttons[i] = b
     end
     b:SetPoint("TOPLEFT", 4, -6 - (i - 1) * 18)
     b:SetWidth(width - 8)
     b.text:SetText((e.checked and (UI.ACCENT .. "• " .. UI.R) or "   ") .. e.text)
+    b.right:SetText(e.right or "")
     b:SetScript("OnClick", function()
       menu:Hide()
       if e.onClick then e.onClick() end
