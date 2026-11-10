@@ -47,6 +47,9 @@ do
   end)
 end
 local scanning = false
+local requestPending = false
+local requestGeneration = 0
+local queuedAt = nil
 local scanRequestedAt = nil
 local scanButton = nil
 
@@ -528,7 +531,7 @@ local function canAutoScan()
 end
 
 -- Everything a button or a tooltip needs to describe the scanner, in one place.
---   phase: "idle" | "waiting" | "saving" | "blocked"
+--   phase: "idle" | "queued" | "waiting" | "saving" | "blocked"
 function NS.ScanState()
   local state = { phase = "idle" }
   if scanning and packing then
@@ -536,7 +539,7 @@ function NS.ScanState()
     state.packed = packing.index
     state.total = packing.count
   elseif scanning then
-    state.phase = "waiting"
+    state.phase = requestPending and "queued" or "waiting"
     state.elapsed = now() - (scanRequestedAt or now())
   else
     local wait = nextScanIn()
@@ -562,6 +565,7 @@ end
 
 -- The text for a scan button in the current state. Pure, so the harness can check it.
 function NS.ScanButtonText(state)
+  if state.phase == "queued" then return string.format("Queued... %ds", state.elapsed or 0) end
   if state.phase == "waiting" then
     -- A listing lands within about ninety seconds. Past three minutes the server has almost
     -- certainly dropped the request without saying so; the wait goes on, since a late listing
@@ -582,7 +586,9 @@ end
 -- The lines under a scan button or on the minimap tooltip.
 function NS.ScanStatusLines(tt, state)
   state = state or NS.ScanState()
-  if state.phase == "waiting" then
+  if state.phase == "queued" then
+    tt:AddLine("Waiting for the auction house request channel. The full listing has not been requested yet.", 1, 1, 1, true)
+  elseif state.phase == "waiting" then
     if (state.elapsed or 0) >= NO_REPLY_S then
       tt:AddLine("No reply from the server after three minutes: it has probably dropped the request. Close the auction house and open it again to try once the countdown allows.", 1, 1, 1, true)
     else
@@ -660,7 +666,7 @@ local AUTO_UPLOAD_DELAY = 1.5 -- seconds after the house closes, so its frame is
 function NS.AutoUploadWanted(state)
   state = state or NS.ScanState()
   if not NS.Setting("autoUpload") then return false end
-  if state.phase == "waiting" or state.phase == "saving" then return false end
+  if state.phase == "queued" or state.phase == "waiting" or state.phase == "saving" then return false end
   return state.unsent == true and state.contribute == true
 end
 
@@ -755,6 +761,9 @@ end
 
 local function endScan()
   scanning = false
+  requestPending = false
+  requestGeneration = requestGeneration + 1
+  queuedAt = nil
   packing = nil
   setButtonState()
 end
@@ -903,10 +912,40 @@ function NS.OnPricesChanged()
 end
 
 local function beginPacking()
+  -- Another addon can deliver a listing while our request is still queued. Use it
+  -- and invalidate the pending send before packing yields to another frame.
+  requestPending = false
+  requestGeneration = requestGeneration + 1
+  queuedAt = nil
   local count = C_AuctionHouse.GetNumReplicateItems() or 0
   packing = { index = 0, count = count, pieces = {}, n = 0, skipped = 0, slicer = NS.NewSlicer() }
   setButtonState()
   packStep()
+end
+
+-- The opening browse request can still hold the throttle channel when the house opens.
+-- ReplicateItems can then return without a listing ever arriving. Wait before sending;
+-- polling checks readiness only and never retries a request that has been sent.
+local function trySendScanRequest(generation)
+  if generation ~= requestGeneration or not scanning or not requestPending then return end
+  local house = AuctionHouseFrame or AuctionFrame
+  if house and house.IsShown and not house:IsShown() then endScan(); return end
+  local api = C_AuctionHouse
+  if api.IsThrottledMessageSystemReady and not api.IsThrottledMessageSystemReady() then
+    if now() - (queuedAt or now()) >= 30 then
+      endScan()
+      print_("the auction house request channel stayed busy for 30 seconds; no scan requested. Try again once the search finishes")
+      return
+    end
+    if C_Timer and C_Timer.After then
+      C_Timer.After(0.1, function() trySendScanRequest(generation) end)
+    end
+    return
+  end
+  requestPending = false -- latch before the native call: events can be synchronous
+  scanRequestedAt = now()
+  setButtonState()
+  api.ReplicateItems()
 end
 
 local function startScan(manual)
@@ -928,14 +967,17 @@ local function startScan(manual)
     print_(string.format("trying, but the server allows about one full listing every 15 minutes and the last was %d min ago", minutes(AUTO_SCAN_MIN_INTERVAL - wait)))
   end
   scanning = true
+  requestPending = true
+  requestGeneration = requestGeneration + 1
+  queuedAt = now()
   packing = nil
   longWaitNoted = false
   noReplyNoted = false
   scanRequestedAt = now()
   setButtonState()
   startTicker()
-  if manual then print_("requesting the full listing from the server...") end
-  C_AuctionHouse.ReplicateItems()
+  if manual then print_("preparing to request the full listing from the server...") end
+  trySendScanRequest(requestGeneration)
 end
 NS.StartScan = startScan
 
@@ -1110,8 +1152,11 @@ function NS.ScanEvent(event)
         beginPacking()
       end
     end
+  elseif event == "AUCTION_HOUSE_THROTTLED_SYSTEM_READY" then
+    if requestPending then trySendScanRequest(requestGeneration) end
   elseif event == "AUCTION_HOUSE_THROTTLED_MESSAGE_DROPPED" then
-    if scanning and not packing then
+    -- While queued, no full-scan request exists yet: a dropped message is another query.
+    if scanning and not packing and not requestPending then
       refusedAt = now()
       endScan()
       print_(string.format("the server refused the request; it allows about one full listing every 15 minutes. Next scan in %d min", minutes(nextScanIn())))
@@ -1285,6 +1330,7 @@ AHledger:RegisterEvent("AUCTION_HOUSE_SHOW")
 AHledger:RegisterEvent("AUCTION_HOUSE_CLOSED")
 AHledger:RegisterEvent("REPLICATE_ITEM_LIST_UPDATE")
 AHledger:RegisterEvent("AUCTION_HOUSE_THROTTLED_MESSAGE_DROPPED")
+AHledger:RegisterEvent("AUCTION_HOUSE_THROTTLED_SYSTEM_READY")
 
 AHledger:SetScript("OnEvent", function(_, event, arg1)
   if event == "ADDON_LOADED" then
