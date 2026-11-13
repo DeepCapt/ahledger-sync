@@ -275,7 +275,8 @@ function NS.ShowPosting(anchor, itemID, isCommodity, itemKey)
     if age then lines[#lines + 1] = UI.GREY .. "Table: " .. age .. UI.R end
     if row and (row.lo or row.hi) then lines[#lines + 1] = "30 day " .. NS.Gold(row.lo or row.median) .. UI.GREY .. " to " .. UI.R .. NS.Gold(row.hi or row.median) end
     if row and row.qty and row.qty > 0 then lines[#lines + 1] = UI.Comma(row.qty) .. " listed" end
-    local carried = GetItemCount and GetItemCount(itemID) or 0
+    local getItemCount = (C_Item and C_Item.GetItemCount) or GetItemCount
+    local carried = getItemCount and getItemCount(itemID) or 0
     -- Sell pace, and how long what you carry would take to sell at it.
     for _, l in ipairs(NS.PostingPaceLines(row, carried) or {}) do
       lines[#lines + 1] = l
