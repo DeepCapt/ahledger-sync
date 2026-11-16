@@ -208,6 +208,27 @@ function ListMixin:Refresh()
       self.siteLink:Hide()
     end
   end
+  -- The totals line (opts.totals): a row of sums under the columns, drawn only when there is one.
+  if self.totalLine then
+    local t = n > 0 and self.opts.totals() or nil
+    if t then
+      for _, col in ipairs(self.opts.columns) do
+        local v = t[col.key]
+        local text
+        if col.totalFormat then
+          text = col.totalFormat(v, t)
+        elseif col.format and v ~= nil and type(v) ~= "string" then
+          text = col.format(v, t)
+        else
+          text = v == nil and "" or tostring(v)
+        end
+        self.totalLine.cells[col.key]:SetText(text)
+      end
+      self.totalLine:Show()
+    else
+      self.totalLine:Hide()
+    end
+  end
   if n == 0 then
     self.footer:SetText(self.opts.empty or "")
   else
@@ -225,7 +246,10 @@ function UI.List(parent, opts)
   opts.rowHeight = opts.rowHeight or 18
   local frame = CreateFrame("Frame", nil, parent)
   frame:SetPoint("TOPLEFT", opts.x or 0, opts.y or 0)
-  frame:SetSize(opts.width, 18 + opts.rows * opts.rowHeight + 16)
+  -- Header, rows, an optional totals line (a rule and a row's height), the footer.
+  local totalsHeight = opts.totals and (opts.rowHeight + 4) or 0
+  frame.height = 18 + opts.rows * opts.rowHeight + totalsHeight + 16
+  frame:SetSize(opts.width, frame.height)
   for k, v in pairs(ListMixin) do frame[k] = v end
   frame.opts = opts
   frame.rows = {}
@@ -245,6 +269,7 @@ function UI.List(parent, opts)
     h.text:SetText(col.label)
     if col.tip then
       h:SetScript("OnEnter", function(self)
+        if GameTooltip:IsForbidden() then return end
         GameTooltip:SetOwner(self, "ANCHOR_TOP")
         GameTooltip:SetText(col.label, 1, 1, 1)
         GameTooltip:AddLine(col.tip, 0.8, 0.8, 0.8, true)
@@ -292,7 +317,7 @@ function UI.List(parent, opts)
       if self.row and opts.onClick then opts.onClick(self.row, button) end
     end)
     r:SetScript("OnEnter", function(self)
-      if not self.row then return end
+      if not self.row or GameTooltip:IsForbidden() then return end
       GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
       if self.row.itemID then
         GameTooltip:SetItemByID(self.row.itemID)
@@ -306,7 +331,49 @@ function UI.List(parent, opts)
     frame.lines[i] = r
   end
 
+  -- The totals line under the rows: a thin rule, then the sums under the rows' cells. Its label
+  -- is in the game's gold font so it never reads as one more item; the sums are in the rows'
+  -- own font, so their digits match the figures above. Hovering it runs opts.totalsEnter.
+  frame.totalLine = false
+  if opts.totals then
+    local t = CreateFrame("Frame", nil, frame)
+    t:SetSize(opts.width, opts.rowHeight)
+    t:SetPoint("TOPLEFT", 0, -18 - opts.rows * opts.rowHeight - 4)
+    local rule = t:CreateTexture(nil, "ARTWORK")
+    rule:SetColorTexture(0.6, 0.6, 0.62, 0.35)
+    rule:SetHeight(1)
+    rule:SetPoint("TOPLEFT", 0, 2)
+    rule:SetPoint("TOPRIGHT", 0, 2)
+    t.cells = {}
+    local cx = 0
+    for i, col in ipairs(opts.columns) do
+      local fs = t:CreateFontString(nil, "OVERLAY", i == 1 and "GameFontNormalSmall" or "GameFontHighlightSmall")
+      fs:SetPoint("LEFT", cx, 0)
+      fs:SetWidth(col.width)
+      fs:SetJustifyH(col.justify or "LEFT")
+      fs:SetWordWrap(false)
+      t.cells[col.key] = fs
+      cx = cx + col.width + 6
+    end
+    if opts.totalsEnter then
+      t:EnableMouse(true)
+      t:SetScript("OnEnter", function(self)
+        if GameTooltip:IsForbidden() then return end
+        -- Above the line, over the rows it sums, starting at the list's left edge: anchored to
+        -- the right it would open past the window on a narrow screen.
+        GameTooltip:SetOwner(self, "ANCHOR_NONE")
+        GameTooltip:SetPoint("BOTTOMLEFT", self, "TOPLEFT", 0, 2)
+        opts.totalsEnter(GameTooltip)
+        GameTooltip:Show()
+      end)
+      t:SetScript("OnLeave", function() if not GameTooltip:IsForbidden() then GameTooltip:Hide() end end)
+    end
+    t:Hide()
+    frame.totalLine = t
+  end
+
   -- One muted line at the right of the footer: the full page on ahledger.com (Site.lua).
+  frame.siteLink = false
   if opts.siteLink then
     local b = CreateFrame("Button", nil, frame)
     b:SetSize(math.floor(opts.width * 0.6), 14)

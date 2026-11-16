@@ -105,11 +105,23 @@ local function encode()
   end
   table.sort(watch)
   out[#out + 1] = "w=" .. table.concat(watch, ",")
+  -- Scanner only answers kept per addon (0.14.3): the folder name in hex, since it may hold
+  -- characters clean() strips, then d (said no) or o (turned it off after saying yes).
+  local asks = {}
+  for name, v in pairs(type(db.scannerAsks) == "table" and db.scannerAsks or {}) do
+    if type(name) == "string" and (v == "declined" or v == "off") then
+      asks[#asks + 1] = name:gsub(".", function(c) return string.format("%02x", c:byte()) end) .. ":" .. (v == "declined" and "d" or "o")
+    end
+  end
+  if #asks > 0 then
+    table.sort(asks)
+    out[#out + 1] = "sa=" .. table.concat(asks, ",")
+  end
   return table.concat(out, ";")
 end
 
 local function decode(str)
-  local settings, watch, last = {}, {}, nil
+  local settings, watch, last, asks = {}, {}, nil, {}
   for pair in str:gmatch("[^;]+") do
     local k, v = pair:match("^([%w]+)=(.*)$")
     if k == "ls" then
@@ -125,11 +137,17 @@ local function decode(str)
           }
         end
       end
+    elseif k == "sa" then
+      for hex, code in v:gmatch("(%x+):([do])") do
+        if #hex % 2 == 0 then
+          asks[hex:gsub("%x%x", function(h) return string.char(tonumber(h, 16)) end)] = code == "d" and "declined" or "off"
+        end
+      end
     elseif k and k ~= "v" then
       settings[k] = v
     end
   end
-  return settings, watch, last
+  return settings, watch, last, asks
 end
 
 local saveTimer = nil
@@ -168,7 +186,7 @@ function NS.PersistRestore()
     NS.PersistState = "empty"
     return
   end
-  local settings, watch, last = decode(str)
+  local settings, watch, last, asks = decode(str)
   local db = NS.Db()
   local applied = 0
   if last and not db.lastScanAt then
@@ -193,6 +211,7 @@ function NS.PersistRestore()
   for id, w in pairs(watch) do
     db.watch[id] = { below = w.below, above = w.above, pctBelow = w.pctBelow, qtyBelow = w.qtyBelow, appears = w.appears, appearsMax = w.appearsMax }
   end
+  if next(asks) and (type(db.scannerAsks) ~= "table" or not next(db.scannerAsks)) then db.scannerAsks = asks end
   NS.PersistState = "restored"
   NS.PersistApplied = applied
 end

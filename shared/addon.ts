@@ -105,10 +105,64 @@ export interface AddonUploadJob {
   build: string | null;
   /** SHA-256 of the raw request body; doubles as the scan's payload hash. */
   payloadHash: string;
-  /** Base64 of the gzip-compressed upload body (the whole UploadScan JSON), exactly as received. */
-  bodyGz: string;
+  /**
+   * Base64 of the gzip-compressed upload body (the whole UploadScan JSON), exactly as received.
+   * Only when the API has no payload store: a big house's scan is megabytes, and every queued
+   * job sits in a 1 GB Valkey that refuses writes when full.
+   */
+  bodyGz?: string;
+  /**
+   * Where the API staged the same gzip bytes in the raw archive (uploadPayloadKey), when it has
+   * one. The worker reads the body from there and deletes it once the upload is settled.
+   */
+  bodyKey?: string;
   auctionCount: number;
 }
+
+/**
+ * The archive key a queued upload's body is staged under until the worker has settled it. The
+ * archive stores `<key>.gz`, which holds the gzip bytes the client sent. Keyed by the payload
+ * hash, so a resend of the same body lands on the same object.
+ */
+export function uploadPayloadKey(payloadHash: string): string {
+  return `${UPLOAD_PAYLOAD_PREFIX}/${payloadHash}.json`;
+}
+
+/** The archive prefix of staged upload bodies; anything older than a week there is an orphan. */
+export const UPLOAD_PAYLOAD_PREFIX = 'incoming';
+
+/** BullMQ's largest priority; a larger number waits longer. */
+export const UPLOAD_PRIORITY_MAX = 2_097_151;
+
+/**
+ * The queue priority of an upload (1 runs first). When the workers fall behind, the scans that
+ * keep each market current go first, so "last scan" stays fresh during a backlog:
+ *   - a scan newer than any the API has seen for its market (`newestForMarket`) goes in band 1,
+ *     the rest in band 2, so a quiet market's newest scan runs ahead of every busy market's
+ *     older copies (though behind fresher newest scans of other markets);
+ *   - within a band, the younger the scan when it arrived, the sooner it runs (one step a
+ *     minute, up to a day), so the newest of a burst of saved scans lands first and the older
+ *     ones can then be merged into it (see the worker's supersede rule).
+ * Jobs with equal priority keep their arrival order. The priority is fixed at arrival; the worker
+ * promotes any upload that has waited half an hour (promoteStaleUploads), so none starves.
+ */
+export function uploadPriority(
+  observedAtSec: number,
+  nowMs: number,
+  newestForMarket: boolean,
+): number {
+  const ageMin = Math.max(0, Math.floor((nowMs / 1000 - observedAtSec) / 60));
+  const step = 1 + Math.min(ageMin, 1439);
+  return Math.min(UPLOAD_PRIORITY_MAX, (newestForMarket ? 0 : 1440) + step);
+}
+
+/**
+ * The queue priority of an observations job (vendor, quest and drop tables) on the same queue:
+ * level with the start of band 2, so it runs after every market's newest scan and ahead of the
+ * older copies. Without one it would go to BullMQ's plain wait list, which runs before every
+ * prioritized upload.
+ */
+export const OBSERVATIONS_PRIORITY = 1441;
 
 export function uploadSigningString(ts: string, nonce: string, bodySha256Hex: string): string {
   return `AHL1\n${ts}\n${nonce}\n${bodySha256Hex}`;

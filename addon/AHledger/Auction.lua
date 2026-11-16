@@ -191,7 +191,15 @@ local STALE_SHARE = 0.6
 function NS.PostingPaceLines(row, carried)
   if not NS.Setting("tooltipPace") then return nil end
   local pace = NS.Pace(row)
-  if not pace then return nil end
+  if not pace then
+    -- A house with no estimates at all says so (0.14.5); an item missing from a paced table
+    -- (none ever seen) stays quiet.
+    local market = NS.Market()
+    if row and NS.MarketPaced(market) == false then
+      return { UI.GREY .. NS.PaceMissingText(NS.TableIsSeed(market) and not NS.OwnScanInUse(market)) .. UI.R }
+    end
+    return nil
+  end
   local out = { "AH sales: " .. NS.PaceColour(pace.tier) .. NS.PacePhrase(pace.tier) .. UI.R .. UI.GREY .. ", " .. NS.SoldText(pace.perDay) .. UI.R }
   local clear = NS.ClearText(pace, carried)
   if clear then out[#out + 1] = UI.GREY .. (clear:gsub("^%l", string.upper)) .. UI.R end
@@ -241,9 +249,15 @@ end
 local shown = nil -- { anchor, itemID, isCommodity, itemKey } of the item in the panel
 
 function NS.ShowPosting(anchor, itemID, isCommodity, itemKey)
-  if not NS.Setting("postingHelper") then return end
   if not itemID then
     shown = nil
+    if panel then panel:Hide() end
+    return
+  end
+  -- Off (by hand or by scanner only): a panel already up goes, rather than keep the last item.
+  -- The item is still noted, so the panel comes back for it if the switch does.
+  if not NS.Setting("postingHelper") then
+    shown = { anchor = anchor, itemID = itemID, isCommodity = isCommodity, itemKey = itemKey }
     if panel then panel:Hide() end
     return
   end
@@ -303,6 +317,20 @@ function NS.ShowPosting(anchor, itemID, isCommodity, itemKey)
   p:Show()
 end
 
+local classicSellUpdate -- below
+
+-- The posting switches flipped: the panel goes, or is drawn again for the item in the sell slot
+-- with the plan added or dropped.
+function NS.RefreshPostingPanel()
+  if not NS.Setting("postingHelper") then
+    if panel then panel:Hide() end
+  elseif shown then
+    guard("posting helper", NS.ShowPosting, shown.anchor, shown.itemID, shown.isCommodity, shown.itemKey)
+  elseif classicSellUpdate and AuctionFrame and AuctionFrame.IsShown and AuctionFrame:IsShown() then
+    classicSellUpdate()
+  end
+end
+
 -- The house answered a search. When it is for the item in the panel, the panel is drawn again
 -- with the lowest listing. arg = the item id (commodities) or the item key (other items).
 function NS.OnAuctionSearchResults(event, arg)
@@ -353,14 +381,15 @@ local function hookModernSell()
 end
 
 -- Classic Era: NEW_AUCTION_UPDATE fires when an item lands in the sell slot.
-local function classicSellUpdate()
+classicSellUpdate = function()
   if not GetAuctionSellItemInfo or not AuctionFrame then return end
   guard("posting helper", function()
     local name, _, count, _, _, _, _, _, _, itemID = GetAuctionSellItemInfo()
     if itemID and itemID > 0 then
       NS.ShowPosting(AuctionFrame, itemID, false)
-    elseif panel then
-      panel:Hide()
+    else
+      -- The slot emptied: the panel goes and the item is forgotten.
+      NS.ShowPosting(AuctionFrame, nil)
     end
     local _ = name
     local _ = count
@@ -519,9 +548,13 @@ local function hookBrowseBuilder(tb)
   sweep(tb)
 end
 
--- Redraws the rows on screen after the option is flipped, without a reload.
+local decorateClassic -- below, with the Classic hooks
+
+-- Redraws the rows on screen after the option is flipped, without a reload: written when it is
+-- on, emptied when it is off.
 function NS.RefreshMedianColumn()
   if browseBuilder then sweep(browseBuilder) end
+  if decorateClassic and AuctionFrameBrowse and AuctionFrameBrowse:IsShown() then decorateClassic() end
 end
 
 local function hookModernBrowse()
@@ -541,8 +574,10 @@ local function hookModernBrowse()
   end)
 end
 
-local function decorateClassic()
-  if not AuctionFrameBrowse or not NS.Setting("ahColumn") then return end
+decorateClassic = function()
+  -- Runs with the column off too: decorate() empties the text, so a row Blizzard reuses never
+  -- keeps a median from before the switch went off.
+  if not AuctionFrameBrowse then return end
   guard("results column", function()
     local offset = FauxScrollFrame_GetOffset and FauxScrollFrame_GetOffset(BrowseScrollFrame) or 0
     for i = 1, (NUM_BROWSE_TO_DISPLAY or 8) do

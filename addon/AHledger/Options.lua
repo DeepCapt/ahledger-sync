@@ -8,14 +8,21 @@ local _, NS = ...
 -- Modern clients (Forever runs the Mainline UI) moved item info under C_Item.
 local GetItemInfo = (C_Item and C_Item.GetItemInfo) or GetItemInfo
 
+-- What scanner only turns off, in the words every message about it uses (ScannerOnly.lua).
+NS.SCANNER_ONLY_WHAT = "tooltip lines, ledger bar, crafting margins and recipe dots, auction house panels, bag dots, vendor and quest reward marks, watchlist alerts, links to ahledger.com and chat summaries"
+-- And what stays, in the same words everywhere.
+NS.SCANNER_ONLY_KEPT = "The scan button with its Save and upload, the minimap button and the line that says when your market needs a scan stay as you have them."
+
 local OPTIONS = {
+  { key = "scannerOnly", short = "Scanner only (prices shown by another addon)", label = "Scanner only (prices shown by another addon)", tip = "For players who see AHledger's prices through another addon. AHledger keeps scanning the auction house and AHledger sync keeps sending your scans, as the scanning and contribution switches below are set. " .. NS.SCANNER_ONLY_KEPT .. " AHledger's " .. NS.SCANNER_ONLY_WHAT .. " turn off. Turning this off puts those switches back as they were. /ahl scanner on and /ahl scanner off do the same.", announces = true },
   { key = "tooltip", short = "Prices in item tooltips", label = "Show prices in item tooltips", tip = "The AHledger line on every item tooltip." },
   { key = "tooltipShift", short = "Tooltip: only while Shift is held", label = "Tooltip: show prices only while Shift is held", tip = "Keeps item tooltips short until you hold Shift over the item; the block appears the moment the key goes down." },
-  { key = "tooltipMin", short = "Tooltip: minimum buyout", label = "Tooltip: show minimum buyout", tip = "Beside the median." },
+  { key = "tooltipMin", short = "Tooltip: lowest buyout", label = "Tooltip: show the lowest buyout", tip = "The lowest buyout in the latest scan, after the median, in the short and the full tooltip. Not shown twice when the lowest already leads." },
+  { key = "tooltipLeadLowest", short = "Tooltip: lead with the lowest buyout", label = "Tooltip: lead with the lowest buyout", tip = "Puts the lowest buyout in the latest scan first, the price you would pay, then the median, in the short and the full tooltip. The median still decides Auction it or Vendor it and the craft or buy line. The lowest can be a single item, or already bought since the scan." },
   { key = "tooltipChange", short = "Tooltip: 7-day change", label = "Tooltip: show 7-day change", tip = "Median now against the 7-day median." },
   { key = "tooltipQuantity", short = "Tooltip: units listed", label = "Tooltip: show units listed", tip = "How many are on the auction house right now." },
   { key = "tooltipPace", short = "Tooltip: AH sales speed", label = "Tooltip: show how fast it sells on the auction house", tip = "Sells fast, steadily, slowly or barely, with the estimated units sold a day and how soon the current listings would clear. ahledger.com estimates it from players' scans; it leans low. /ahl pace explains it." },
-  { key = "tooltipVendor", short = "Tooltip: vendor sell price", label = "Tooltip: show vendor sell price", tip = "" },
+  { key = "tooltipVendor", short = "Tooltip: vendor prices", label = "Tooltip: show vendor prices", tip = "What a vendor pays you for the item, and a Buy from a vendor line when a vendor sells it for less than its lowest listing." },
   { key = "tooltipDisenchant", short = "Tooltip: disenchant value", label = "Tooltip: show disenchant value", tip = "Expected value of the materials at current prices, for uncommon and better gear." },
   { key = "crafting", short = "Crafting margins", label = "Crafting margins in profession windows", tip = "Reagent cost, result value, and margin under the recipe." },
   { key = "craftDots", short = "Profession window: profit dots", label = "Profit dots beside each recipe in the profession window", tip = "A dot at the right of every recipe in the list, so you can see what pays without clicking each one. Green clears 10% over reagent cost, grey is about even, yellow loses up to 30%, red more, and a grey question mark means something is unpriced. Hover a row for the exact margin. Needs Crafting margins on." },
@@ -36,7 +43,7 @@ local OPTIONS = {
   { key = "barTicker", short = "Ledger bar: watchlist ticker", label = "Ledger bar: walk the watchlist", tip = "The last segment shows one watched item at a time with its median and 7-day change, changing every few seconds." },
   { key = "tooltipCompact", short = "Tooltip: compact, one line and a verdict", label = "Tooltip: compact block", tip = "Replaces the full block with one line (median, 7-day change, units listed) and a verdict: Auction it or Vendor it. The other tooltip switches still apply." },
   { key = "tooltipShiftMore", short = "Tooltip: compact until Shift is held", label = "Tooltip: compact block, hold Shift for the full one", tip = "Keeps item tooltips short (the compact block) and shows the full block, with the range, sales pace, craft cost, other markets, vendor and disenchant lines, while Shift is held. The compact block option above wins when it is on." },
-  { key = "tooltipCraft", short = "Tooltip: craft or buy", label = "Tooltip: say whether to craft it or buy it", tip = "For an item one of your characters can make: the reagent cost at current medians against the item's median. Craft it, Buy it, or Craft or buy. Recipes are remembered whenever a profession window is open." },
+  { key = "tooltipCraft", short = "Tooltip: craft or buy", label = "Tooltip: say whether to craft it or buy it", tip = "For an item one of your characters can make: the reagent cost at current medians, or at the vendor price for a reagent a vendor sells for less, against the item's median. Craft it, Buy it, or Craft or buy. Recipes are remembered whenever a profession window is open." },
   { key = "tooltipMarkets", short = "Tooltip: other faction and cheapest market", label = "Tooltip: show the other faction's price and the cheapest market in the region", tip = "In the full block: the item's median on the other faction's house, and the house in your region where it is cheapest when that beats yours. Uses the tables AHledger sync already writes." },
   { key = "bagDots", short = "Bags: dots on slots", label = "Bags: a dot on each slot worth noting", tip = "Bottom-left corner of a bag slot. Green: worth auctioning, the median beats the vendor by half again. Yellow: vendor it, the vendor pays more than the auction median. Grey: junk. Blue: on your watchlist." },
   { key = "pulse", short = "Market pulse at login", label = "Say what moved on your market at login", tip = "When a newer price table loads, one line with the three biggest risers and fallers since the last one you saw. /ahl pulse prints it again." },
@@ -58,6 +65,10 @@ local OPTIONS = {
 NS.OPTIONS = OPTIONS
 
 local category = nil
+-- The panel's own controls, so a change made elsewhere (scanner only turns many switches at
+-- once, /ahl set, the window's Options tab) shows when the panel is next looked at.
+local panelSettings = {}
+local legacyChecks = {}
 
 local function registerWithSettingsApi()
   local cat, layout = Settings.RegisterVerticalLayoutCategory("AHledger")
@@ -66,18 +77,21 @@ local function registerWithSettingsApi()
     local variable = "AHLEDGER_" .. o.key:upper()
     local function apply(v)
       v = v and true or false
-      if NS.Setting(o.key) ~= v then
+      if (NS.Setting(o.key) and true or false) ~= v then
         NS.SetSetting(o.key, v)
-        NS.Print(string.format("%s: %s", o.label, v and "on" or "off"))
+        if not o.announces then NS.Print(string.format("%s: %s", o.label, v and "on" or "off")) end
       end
     end
-    local setting = Settings.RegisterProxySetting(cat, variable, Settings.VarType.Boolean, o.label, NS.Setting(o.key) and true or false,
+    -- The default is the switch's fresh-install value, which is what the panel's Defaults
+    -- button puts back (not the value it had at login).
+    local setting = Settings.RegisterProxySetting(cat, variable, Settings.VarType.Boolean, o.label, NS.DefaultSetting(o.key) and true or false,
       function() return NS.Setting(o.key) and true or false end,
       apply)
     -- Some client builds only notify through the value-changed callback, so listen there too.
     if Settings.SetOnValueChangedCallback then
       Settings.SetOnValueChangedCallback(variable, function(_, _, v) apply(v) end)
     end
+    panelSettings[o.key] = setting
     local createCheckbox = Settings.CreateCheckbox or Settings.CreateCheckBox
     createCheckbox(cat, setting, o.tip ~= "" and o.tip or nil)
   end
@@ -122,8 +136,10 @@ local function registerLegacyPanel()
     cb.tooltipText = o.tip ~= "" and o.tip or nil
     cb:SetChecked(NS.Setting(o.key) and true or false)
     cb:SetScript("OnClick", function(self) NS.SetSetting(o.key, self:GetChecked() and true or false) end)
+    legacyChecks[o.key] = cb
     y = y - 26
   end
+  frame:SetScript("OnShow", function() NS.SyncOptionsPanel() end)
   local note = frame:CreateFontString(nil, "ARTWORK", "GameFontNormalSmall")
   note:SetPoint("TOPLEFT", 16, y - 8)
   note:SetWidth(560)
@@ -131,6 +147,17 @@ local function registerLegacyPanel()
   note:SetText("Market: " .. NS.Market() .. "   ·   /ahl watch for the watchlist, /ahl import to paste a price table")
   if InterfaceOptions_AddCategory then InterfaceOptions_AddCategory(frame) end
   category = frame
+end
+
+-- Brings the panel's checkboxes in line with the saved settings. Never raises: a client whose
+-- Settings objects lack NotifyUpdate keeps the old look until the panel is reopened.
+function NS.SyncOptionsPanel()
+  for _, setting in pairs(panelSettings) do
+    if setting.NotifyUpdate then pcall(setting.NotifyUpdate, setting) end
+  end
+  for key, cb in pairs(legacyChecks) do
+    pcall(cb.SetChecked, cb, NS.Setting(key) and true or false)
+  end
 end
 
 function NS.OpenOptions()
@@ -150,12 +177,17 @@ function NS.OnSettingChanged(key)
   if (key == "observe" or key == "contribute") and NS.ObserveRefresh then NS.ObserveRefresh() end
   if key == "ahColumn" and NS.RefreshMedianColumn then NS.RefreshMedianColumn() end
   if (key == "craftDots" or key == "crafting") and NS.RefreshRecipeDots then NS.RefreshRecipeDots() end
-  if (key == "bar" or key == "barLocked" or key == "barTicker" or key == "dealsPercent" or key == "dealsMinValue") and NS.RefreshBar then NS.RefreshBar() end
+  if key == "crafting" and NS.RefreshCraftLine then NS.RefreshCraftLine() end
+  if (key == "postingHelper" or key == "postingPlan") and NS.RefreshPostingPanel then NS.RefreshPostingPanel() end
+  -- NS.SettingsBatch: scanner only flipping many switches at once redraws the bar and the
+  -- window once at the end instead of after each one.
+  local batch = NS.SettingsBatch
+  if (key == "bar" or key == "barLocked" or key == "barTicker" or key == "dealsPercent" or key == "dealsMinValue") and NS.RefreshBar and not batch then NS.RefreshBar() end
   if key == "vendorFlips" and NS.RefreshVendorFlips then NS.RefreshVendorFlips() end
   if key == "questRewards" and NS.RefreshQuestRewards then NS.RefreshQuestRewards() end
   if key == "bagDots" and NS.RefreshBagDots then NS.RefreshBagDots() end
   if NS.PvpSettingChanged then NS.PvpSettingChanged(key) end
-  if key ~= "minimapAngle" and key ~= "barX" and key ~= "barY" and NS.RefreshWindow then NS.RefreshWindow() end
+  if key ~= "minimapAngle" and key ~= "barX" and key ~= "barY" and NS.RefreshWindow and not batch then NS.RefreshWindow() end
 end
 
 -- ---------------------------------------------------------------------------------------------
@@ -263,34 +295,38 @@ function NS.OnLogin()
   if C_Timer and C_Timer.After then
     C_Timer.After(5, function() if NS.CheckAlerts then NS.CheckAlerts() end end)
   end
+  -- In scanner only the version notes about the interface are marked as seen without being
+  -- said. The ones about what is collected (0.12.0, 0.13.0) are always said: contribution stays on.
+  local quiet = NS.Setting("scannerOnly")
+  local function say(msg) if not quiet then NS.Print(msg) end end
   -- Once, after updating to 0.9.0: what the new tooltip line is, and where to read more.
   local db = NS.Db()
   if not db.paceIntro then
     db.paceIntro = true
-    NS.Print("0.9.0: tooltips now show how fast an item sells on your auction house, estimated from players' scans. /ahl pace explains it.")
+    say("0.9.0: tooltips now show how fast an item sells on your auction house, estimated from players' scans. /ahl pace explains it.")
   end
   -- Once, after updating to 0.9.7: the two things players asked for first.
   if not db.intro097 then
     db.intro097 = true
-    NS.Print("0.9.7: the watchlist can alert when an item appears on the auction house (/ahl watch appears [item]), and item tooltips can show prices only while Shift is held (an option in /ahl).")
+    say("0.9.7: the watchlist can alert when an item appears on the auction house (/ahl watch appears [item]), and item tooltips can show prices only while Shift is held (an option in /ahl).")
   end
   -- Once, after updating to 0.9.9: RP PvP realms price on their own market from now on.
   if not db.intro099 then
     db.intro099 = true
     local market = NS.Market()
     if market:find("^forever/rppvp/") then
-      NS.Print("0.9.9: RP PvP is its own market now. Prices here come from RP PvP scans only; the first ones fill in as players scan.")
+      say("0.9.9: RP PvP is its own market now. Prices here come from RP PvP scans only; the first ones fill in as players scan.")
     end
   end
   -- Once, after updating to 0.10.0: what changed in the tooltip, and where the rest is.
   if not db.intro0100 then
     db.intro0100 = true
-    NS.Print("0.10.0: item tooltips are compact until you hold Shift, which adds the sales pace, craft-or-buy, the other faction's price and the cheapest market. Bag slots carry dots, the posting panel plans quantities, and your watchlist follows your account. Every one of these is a switch in /ahl options.")
+    say("0.10.0: item tooltips are compact until you hold Shift, which adds the sales pace, craft-or-buy, the other faction's price and the cheapest market. Bag slots carry dots, the posting panel plans quantities, and your watchlist follows your account. Every one of these is a switch in /ahl options.")
   end
   -- Once, after updating to 0.11.0: the ledger and the undercut check.
   if not db.intro0110 then
     db.intro0110 = true
-    NS.Print("0.11.0: the Ledger tab (/ahl ledger) keeps what you post, sell and buy, from the auction house and its mail, and when your auctions list loads the addon says which of them are undercut.")
+    say("0.11.0: the Ledger tab (/ahl ledger) keeps what you post, sell and buy, from the auction house and its mail, and when your auctions list loads the addon says which of them are undercut.")
   end
   -- Once, after updating to 0.12.0: the players you see seed the PvP ladder.
   if not db.intro0120 then
@@ -300,7 +336,12 @@ function NS.OnLogin()
   -- Once, after updating to 0.13.0: PvP ranks on tooltips, and your own Rank Points.
   if not db.intro0130 and NS.IsForeverClient and NS.IsForeverClient() then
     db.intro0130 = true
-    NS.Print("0.13.0: mouse over a player to see their PvP rank and kills from the ladder (AHledger sync downloads it for your region), and with Contribute on, your own Rank Points go to your character page on ahledger.com to show how far the next rank is. Both are switches in /ahl options; turning Rank Points off deletes what was noted.")
+    if quiet then
+      -- Scanner only has the PvP tooltip off; what is collected is still said.
+      NS.Print("0.13.0: with Contribute on, your own Rank Points go to your character page on ahledger.com to show how far the next rank is. A switch in /ahl options; turning it off deletes what was noted.")
+    else
+      NS.Print("0.13.0: mouse over a player to see their PvP rank and kills from the ladder (AHledger sync downloads it for your region), and with Contribute on, your own Rank Points go to your character page on ahledger.com to show how far the next rank is. Both are switches in /ahl options; turning Rank Points off deletes what was noted.")
+    end
   end
   -- Once, in the two weeks after launch (Site.lua; off with siteLinks).
   local launch = NS.LaunchNudge and NS.LaunchNudge(db, time and time() or nil)

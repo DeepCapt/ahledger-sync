@@ -1,6 +1,6 @@
 [package]
 name = "ahledger-sync"
-version = "0.2.28"
+version = "0.2.29"
 description = "AHledger sync: uploads addon auction house scans to ahledger.com"
 authors = ["AHledger"]
 license = "MIT"
@@ -15,7 +15,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -35,3 +35,7 @@ lto = true
 opt-level = "s"
 panic = "abort"
 strip = true
+
+[target."cfg(windows)".dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
+winreg = "0.55"

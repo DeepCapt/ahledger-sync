@@ -17,7 +17,7 @@
 ]]
 
 local ADDON_NAME, NS = ...
-NS.VERSION = "0.14.0"
+NS.VERSION = "0.14.5"
 
 local MAX_SCANS_PER_MARKET = 3 -- newest scans kept per realm+faction (about 1 MB each at 50k listings)
 local MAX_SCANS_TOTAL = 12 -- hard ceiling on the SavedVariables file across every realm and faction
@@ -189,6 +189,7 @@ local DEFAULTS = {
   tooltip = true,
   tooltipShift = false,
   tooltipMin = true,
+  tooltipLeadLowest = false,
   tooltipChange = true,
   tooltipQuantity = true,
   tooltipVendor = true,
@@ -249,6 +250,12 @@ local DEFAULTS = {
   -- 0.13.0: a player's PvP rank and kills on their tooltip, and your own Rank Points for the site.
   tooltipPvp = true,
   pvpPoints = true,
+  -- 0.14.3: scanner only, for players who see AHledger's prices through another addon. On, it
+  -- turns AHledger's own interface switches off and leaves scanning and uploading as they are.
+  scannerOnly = false,
+  -- The interface switches the player already had off when scanner only went on, dot-separated:
+  -- the ones to leave off when it goes off again. A setting, so the CVar backup keeps it.
+  scannerKeptOff = "",
 }
 -- Settings written while something is dragged: not worth a "last change" note each frame.
 local SILENT = { minimapAngle = true, barX = true, barY = true }
@@ -298,7 +305,15 @@ function NS.Setting(key)
   return ensureDb().settings[key]
 end
 
-function NS.SetSetting(key, value)
+-- What a switch is on a fresh install (scanner only falls back to these when its note of the
+-- player's own choices is gone).
+function NS.DefaultSetting(key)
+  return DEFAULTS[key]
+end
+
+-- Writes one setting and tells the modules. NS.SetSetting below is the way in for everything
+-- else; scanner only (ScannerOnly.lua) writes its batch of switches through this directly.
+local function writeSetting(key, value)
   local db = ensureDb()
   if db.settings[key] ~= value and not SILENT[key] then
     -- Remember the last change and where it came from, for /ahl status and bug reports.
@@ -309,6 +324,16 @@ function NS.SetSetting(key, value)
   db.settings[key] = value
   if NS.OnSettingChanged then NS.OnSettingChanged(key, value) end
   if NS.PersistSave then NS.PersistSave() end
+end
+NS.WriteSetting = writeSetting
+
+function NS.SetSetting(key, value)
+  -- Scanner only is a preset: switching it turns a set of other switches off, or back.
+  if key == "scannerOnly" and NS.ApplyScannerOnly then
+    NS.ApplyScannerOnly(value and true or false)
+    return
+  end
+  writeSetting(key, value)
 end
 
 -- Test and PTR clients report a region id outside the retail set; fall back to the login portal.
@@ -355,6 +380,12 @@ function NS.ClientInfo()
   -- a region's servers open, every Forever realm is a pre-launch realm (0.9.6).
   if NS.IsForeverClient() and (realm:lower():find("^classic beta") or NS.Now() < NS.LaunchAt(region)) then
     region = "us"
+  end
+  -- The Taiwanese Forever realms are served from the Korean region and share its auction houses,
+  -- so their prices are the KR market's (0.14.4); the site files their scans there too. A Taiwan
+  -- client reports its own region id, which no market carries.
+  if NS.IsForeverClient() and region == "tw" then
+    region = "kr"
   end
   return {
     build = string.format("%s (%s)", tostring(version), tostring(build)),
@@ -1174,8 +1205,8 @@ function NS.Status()
   if caught and caught.msg then
     print_(string.format("caught error in %s: %s. Send this line through ahledger.com/contact.", caught.what or "?", caught.msg))
   end
-  print_(string.format("v%s | %s %s %s | market %s | auto-scan %s | contribute %s | %d scan(s) stored | %d source line(s) | %d quest(s)",
-    NS.VERSION, info.realm, info.faction, info.region, market,
+  print_(string.format("v%s%s | %s %s %s | market %s | auto-scan %s | contribute %s | %d scan(s) stored | %d source line(s) | %d quest(s)",
+    NS.VERSION, db.settings.scannerOnly and " (scanner only)" or "", info.realm, info.faction, info.region, market,
     db.settings.autoScan and "on" or "off", db.settings.contribute and "on" or "off", #db.scans,
     NS.ObservationCount and NS.ObservationCount() or 0, NS.QuestCount and NS.QuestCount() or 0))
   local changed = {}
@@ -1238,8 +1269,13 @@ SlashCmdList["AHLEDGER"] = function(msg)
       value = (value or ""):lower()
       local v = value == "on" or value == "true" or value == "1"
       if value == "" then v = not db.settings[key] end
-      NS.SetSetting(key, v)
-      print_(key .. ": " .. (v and "on" or "off"))
+      if key == "scannerOnly" and NS.ScannerOnlyCommand then
+        -- The preset, which says what it changed, or that nothing needed to.
+        NS.ScannerOnlyCommand(v and "on" or "off")
+      else
+        NS.SetSetting(key, v)
+        print_(key .. ": " .. (v and "on" or "off"))
+      end
     else
       local keys = {}
       for k, d in pairs(DEFAULTS) do if type(d) == "boolean" then keys[#keys + 1] = k end end
@@ -1263,6 +1299,8 @@ SlashCmdList["AHLEDGER"] = function(msg)
     if NS.ToggleWindow then NS.ToggleWindow() else NS.Status() end
   elseif cmd == "deals" or cmd == "bags" or cmd == "craft" or cmd == "crafting" or cmd == "ledger" then
     if NS.OpenWindow then NS.OpenWindow(cmd == "crafting" and "craft" or cmd) end
+  elseif cmd == "scanner" or cmd == "scanneronly" then
+    if NS.ScannerOnlyCommand then NS.ScannerOnlyCommand(arg) end
   elseif cmd == "options" or cmd == "config" then
     if NS.OpenOptions then NS.OpenOptions() else NS.Status() end
   elseif cmd == "link" then
@@ -1274,7 +1312,7 @@ SlashCmdList["AHLEDGER"] = function(msg)
       if not NS.MarketPulse(true) then print_("nothing has moved since the last price table, or there is no earlier table to compare with yet") end
     end
   else
-    print_("commands: /ahl (window) | deals | bags | craft | ledger | options | scan | upload | status | pace | pulse | link [item] | import | watch add|remove|alert | bar [lock|unlock|reset] | set <option> on|off | market <key|detect> | auto on|off | clear")
+    print_("commands: /ahl (window) | deals | bags | craft | ledger | options | scan | upload | scanner [on|off] | status | pace | pulse | link [item] | import | watch add|remove|alert | bar [lock|unlock|reset] | set <option> on|off | market <key|detect> | auto on|off | clear")
   end
 end
 
@@ -1314,6 +1352,10 @@ AHledger:SetScript("OnEvent", function(_, event, arg1)
       print_(string.format("v%s loaded. Prices for %s: %s. /ahl for options.", NS.VERSION, NS.MarketLabel(market), text))
     else
       print_(string.format("v%s loaded. No price table for %s yet: run AHledger sync, or paste one with /ahl import. /ahl for options.", NS.VERSION, NS.MarketLabel(market)))
+    end
+    if NS.ScannerOnlyLoginLine then
+      local line = NS.ScannerOnlyLoginLine()
+      if line then print_(line) end
     end
     if NS.DbCreated and NS.PersistState == "restored" then
       print_("your saved options and watchlist were not loaded by the game this time; AHledger restored them from its backup.")

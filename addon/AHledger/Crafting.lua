@@ -17,7 +17,8 @@
   selected recipe.
 
   Reagents with no price are listed as unknown and left out of the cost, so a margin is never
-  overstated by a missing number. Works with the modern profession window (Forever)
+  overstated by a missing number. A reagent a vendor sells is costed at the cheaper of the vendor
+  price and the median (0.14.1, Vendor.lua), and the line says which reagents came from a vendor. Works with the modern profession window (Forever)
   and the Classic Era TradeSkill and Craft (Enchanting) frames.
 ]]
 local _, NS = ...
@@ -34,24 +35,49 @@ local function priceOf(itemID, market)
   return row and row.median or nil
 end
 
+-- What a reagent costs to get: the vendor price when a vendor sells it for less than the median
+-- (or the median is unknown), else the median. Returns price, fromVendor. Pure apart from the
+-- tables it reads.
+function NS.ReagentPrice(itemID, market)
+  if not itemID then return nil, false end
+  local median = priceOf(itemID, market)
+  local vendor = NS.VendorPrice and NS.VendorPrice(itemID) or nil
+  if vendor and (not median or vendor < median) then return vendor, true end
+  return median, false
+end
+local reagentPrice = NS.ReagentPrice
+
+-- "Leaded Vial at the vendor price", "Leaded Vial and Empty Vial at vendor prices",
+-- "3 reagents at vendor prices". Pure.
+function NS.VendorReagentsText(names)
+  local n = names and #names or 0
+  if n == 0 then return nil end
+  if n == 1 then return names[1] .. " at the vendor price" end
+  if n == 2 then return names[1] .. " and " .. names[2] .. " at vendor prices" end
+  return string.format("%d reagents at vendor prices", n)
+end
+
 -- One recipe's economics from its reagent list. reagents = { { itemID, name, qty } }.
--- Returns cost, missingNames, value, margin (value may be nil when the result is unpriced).
+-- Returns cost, missingNames, value, margin (value may be nil when the result is unpriced) and
+-- the names of the reagents costed at a vendor price.
 local function economics(reagents, resultID, made, market)
-  local cost, missing = 0, {}
+  local cost, missing, vendor = 0, {}, {}
   for _, r in ipairs(reagents) do
-    local price = r.itemID and priceOf(r.itemID, market) or nil
+    local price, fromVendor = reagentPrice(r.itemID, market)
     if price then
       cost = cost + price * (r.qty or 1)
+      if fromVendor then vendor[#vendor + 1] = r.name or ("item " .. tostring(r.itemID)) end
     else
       missing[#missing + 1] = r.name or ("item " .. tostring(r.itemID))
     end
   end
   local value = resultID and priceOf(resultID, market) or nil
   local total = value and value * (made or 1) or nil
-  return cost, missing, total, total and (total - cost) or nil
+  return cost, missing, total, total and (total - cost) or nil, vendor
 end
 
 local function marginText(cost, total, margin, resultID)
+  local market = NS.Market()
   local parts = { "cost " .. NS.Gold(cost) }
   if total then
     parts[#parts + 1] = "makes " .. NS.Gold(total)
@@ -62,10 +88,18 @@ local function marginText(cost, total, margin, resultID)
     parts[#parts + 1] = UI.GREY .. "result not listed" .. UI.R
   end
   -- How fast the result sells: a margin pays only as fast as that.
-  local pace = (resultID and NS.Setting("tooltipPace")) and NS.Pace(NS.Price(resultID, NS.Market())) or nil
-  if pace then parts[#parts + 1] = NS.PaceColour(pace.tier) .. NS.PacePhrase(pace.tier) .. UI.R end
+  local pace = (resultID and NS.Setting("tooltipPace")) and NS.Pace(NS.Price(resultID, market)) or nil
+  if pace then
+    parts[#parts + 1] = NS.PaceColour(pace.tier) .. NS.PacePhrase(pace.tier) .. UI.R
+  elseif total and NS.Setting("tooltipPace") and NS.MarketPaced(market) == false then
+    -- A house with no estimates at all says so (0.14.5), as the tooltip does.
+    parts[#parts + 1] = UI.GREY .. NS.PACE_MISSING_SHORT .. UI.R
+  end
   return UI.ACCENT .. "AHledger" .. UI.R .. "  " .. table.concat(parts, "  " .. UI.GREY .. "·" .. UI.R .. "  ")
 end
+
+-- For the harness.
+NS.CraftMarginText = marginText
 
 -- ---------------------------------------------------------------------------------------------
 -- Profit bands: one word per recipe, for the dot beside each recipe in the profession window
@@ -239,8 +273,8 @@ function NS.CraftingTable()
     profession = CRAFT.name()
   end
   for _, r in ipairs(recipes) do
-    local cost, missing, total, margin = economics(r.reagents, r.resultID, r.made, market)
-    r.cost, r.missing, r.total, r.margin = cost, missing, total, margin
+    local cost, missing, total, margin, vendor = economics(r.reagents, r.resultID, r.made, market)
+    r.cost, r.missing, r.total, r.margin, r.vendor = cost, missing, total, margin, vendor
     r.pct = (total and cost > 0) and (margin / cost * 100) or nil
     r.key = r.id or r.index
     r.resultRow = r.resultID and NS.Price(r.resultID, market) or nil
@@ -270,20 +304,26 @@ function NS.RememberRecipe(r, profession)
   db.recipes[r.resultID] = { reagents = reagents, made = made > 0 and made or 1, prof = profession, at = NS.Now() }
 end
 
--- Reagent cost per unit made at the market's medians: { cost, missing, prof, made } or nil when
--- no recipe for the item is remembered. missing counts reagents without a price, which are left
--- out of the cost, so the cost is never overstated. Pure.
+-- Reagent cost per unit made at the market's medians, or the vendor price where a vendor sells a
+-- reagent for less: { cost, missing, vendor, prof, made } or nil when no recipe for the item is
+-- remembered. missing counts reagents without a price, which are left out of the cost, so the
+-- cost is never overstated; vendor counts the reagents costed at a vendor price. Pure.
 function NS.CraftCost(itemID, market)
   local db = NS.Db()
   local r = db.recipes and db.recipes[itemID]
   if not r or type(r.reagents) ~= "table" then return nil end
-  local cost, missing = 0, 0
+  local cost, missing, vendor = 0, 0, 0
   for _, g in ipairs(r.reagents) do
-    local price = priceOf(g[1], market or NS.Market())
-    if price then cost = cost + price * (g[2] or 1) else missing = missing + 1 end
+    local price, fromVendor = reagentPrice(g[1], market or NS.Market())
+    if price then
+      cost = cost + price * (g[2] or 1)
+      if fromVendor then vendor = vendor + 1 end
+    else
+      missing = missing + 1
+    end
   end
   local made = (tonumber(r.made) and r.made > 0) and r.made or 1
-  return { cost = cost / made, missing = missing, prof = r.prof, made = made }
+  return { cost = cost / made, missing = missing, vendor = vendor, prof = r.prof, made = made }
 end
 
 -- The tooltip line from a CraftCost answer and the item's median: "Craft it" when the reagents
@@ -293,17 +333,39 @@ function NS.CraftLine(craft, median)
   if type(craft) ~= "table" then return nil end
   if craft.missing > 0 and craft.cost <= 0 then return nil end
   local who = craft.prof and (" with " .. craft.prof) or ""
-  local unpriced = craft.missing > 0 and (UI.GREY .. string.format(" (%d reagent%s unpriced)", craft.missing, craft.missing == 1 and "" or "s") .. UI.R) or ""
+  -- One bracket for what the figure leaves out or took from a vendor: "(1 reagent unpriced, 2
+  -- from a vendor)". Saying where a vendor price went in keeps a cost far under the house from
+  -- reading as a bug.
+  local notes = {}
+  if craft.missing > 0 then notes[#notes + 1] = string.format("%d reagent%s unpriced", craft.missing, craft.missing == 1 and "" or "s") end
+  if (craft.vendor or 0) > 0 then
+    local noun = #notes == 0 and (craft.vendor == 1 and " reagent" or " reagents") or ""
+    notes[#notes + 1] = string.format("%d%s from a vendor", craft.vendor, noun)
+  end
+  local tail = #notes > 0 and (UI.GREY .. " (" .. table.concat(notes, ", ") .. ")" .. UI.R) or ""
   if not median or median <= 0 then
-    return UI.GREY .. "Reagents cost " .. UI.R .. NS.Gold(craft.cost) .. UI.GREY .. " to craft" .. who .. UI.R .. unpriced
+    return UI.GREY .. "Reagents cost " .. UI.R .. UI.WHITE .. NS.Gold(craft.cost) .. UI.R .. UI.GREY .. " to craft" .. who .. UI.R .. tail
   end
   local pct = (craft.cost - median) / median * 100
-  if craft.missing == 0 and pct <= -10 then
-    return UI.UP .. "Craft it" .. UI.R .. UI.GREY .. ": reagents " .. UI.R .. NS.Gold(craft.cost) .. UI.GREY .. string.format(", %.0f%% under the median%s", -pct, who) .. UI.R
+  if pct <= -10 and craft.missing == 0 then
+    return UI.UP .. "Craft it" .. UI.R .. UI.GREY .. ": reagents " .. UI.R .. UI.WHITE .. NS.Gold(craft.cost) .. UI.R .. UI.GREY .. string.format(", %.0f%% under the median%s", -pct, who) .. UI.R .. tail
+  elseif pct <= -10 then
+    -- Under the median before the unpriced reagents, so never a plain Craft it: what they cost
+    -- could close the gap. The count is in the sentence, so the bracket keeps the vendor note.
+    local vend = (craft.vendor or 0) > 0 and (UI.GREY .. string.format(" (%d reagent%s from a vendor)", craft.vendor, craft.vendor == 1 and "" or "s") .. UI.R) or ""
+    return UI.GREY .. "Craft or buy: reagents " .. UI.R .. UI.WHITE .. NS.Gold(craft.cost) .. UI.R .. UI.GREY .. string.format(", %.0f%% under the median%s, before %d unpriced reagent%s", -pct, who, craft.missing, craft.missing == 1 and "" or "s") .. UI.R .. vend
   elseif pct >= 10 then
-    return "|cffffd23fBuy it|r" .. UI.GREY .. ": reagents " .. UI.R .. NS.Gold(craft.cost) .. UI.GREY .. string.format(", %.0f%% over the median%s", pct, who) .. UI.R .. unpriced
+    return "|cffffd23fBuy it|r" .. UI.GREY .. ": reagents " .. UI.R .. UI.WHITE .. NS.Gold(craft.cost) .. UI.R .. UI.GREY .. string.format(", %.0f%% over the median%s", pct, who) .. UI.R .. tail
   end
-  return UI.GREY .. "Craft or buy: reagents " .. UI.R .. NS.Gold(craft.cost) .. UI.GREY .. ", about the median" .. who .. UI.R .. unpriced
+  return UI.GREY .. "Craft or buy: reagents " .. UI.R .. UI.WHITE .. NS.Gold(craft.cost) .. UI.R .. UI.GREY .. ", about the median" .. who .. UI.R .. tail
+end
+
+-- "no price for A, B and 3 more": two names at most, so a recipe of many unpriced reagents
+-- never runs the line off the frame. Pure.
+function NS.MissingText(names)
+  if type(names) ~= "table" or #names == 0 then return nil end
+  if #names <= 2 then return "no price for " .. table.concat(names, " and ") end
+  return string.format("no price for %s, %s and %d more", names[1], names[2], #names - 2)
 end
 
 -- The open profession's name, when the client says.
@@ -333,10 +395,10 @@ function NS.ShoppingList(recipe, n)
     local have = (r.itemID and GetItemCount) and (GetItemCount(r.itemID) or 0) or 0
     local short = need - have
     if short > 0 then
-      local price = r.itemID and priceOf(r.itemID, NS.Market()) or nil
+      local price, fromVendor = reagentPrice(r.itemID, NS.Market())
       local cost = price and price * short or nil
       if cost then total = total + cost else unknown = unknown + 1 end
-      lines[#lines + 1] = { itemID = r.itemID, name = r.name, need = need, have = have, short = short, cost = cost }
+      lines[#lines + 1] = { itemID = r.itemID, name = r.name, need = need, have = have, short = short, cost = cost, vendor = fromVendor and cost ~= nil }
     end
   end
   return lines, total, unknown
@@ -346,13 +408,21 @@ end
 -- Per-recipe line under the reagents
 -- ---------------------------------------------------------------------------------------------
 
+-- One line per window: on Classic the trade skill and craft (Enchanting) windows can be open
+-- together, and switching crafting margins off has to clear both.
+local lines = {}
+
 local function ensureLine(parent, anchor, name)
-  if line and line:GetParent() == parent then return line end
-  line = parent:CreateFontString(name, "OVERLAY", "GameFontNormalSmall")
-  line:SetJustifyH("LEFT")
-  line:SetWidth(300)
-  line:SetPoint("TOPLEFT", anchor, "BOTTOMLEFT", 0, -6)
-  return line
+  local l = lines[parent]
+  if not l then
+    l = parent:CreateFontString(name, "OVERLAY", "GameFontNormalSmall")
+    l:SetJustifyH("LEFT")
+    l:SetWidth(300)
+    l:SetPoint("TOPLEFT", anchor, "BOTTOMLEFT", 0, -6)
+    lines[parent] = l
+  end
+  line = l
+  return l
 end
 
 local function showLine(recipe)
@@ -361,12 +431,15 @@ local function showLine(recipe)
     line:SetText("")
     return
   end
-  local cost, missing, total, margin = economics(recipe.reagents, recipe.resultID, recipe.made, NS.Market())
+  local cost, missing, total, margin, vendor = economics(recipe.reagents, recipe.resultID, recipe.made, NS.Market())
   NS.RememberRecipe(recipe, currentProfession())
   local text = marginText(cost, total, margin, recipe.resultID)
-  if #missing > 0 then
-    text = text .. "\n" .. UI.GREY .. "no price for " .. table.concat(missing, ", ") .. UI.R
-  end
+  -- A line each for the vendor note and what has no price: side by side they ran past the
+  -- line's width and wrapped mid-phrase.
+  local fromVendor = NS.VendorReagentsText(vendor)
+  if fromVendor then text = text .. "\n" .. UI.GREY .. fromVendor .. UI.R end
+  local none = NS.MissingText(missing)
+  if none then text = text .. "\n" .. UI.GREY .. none .. UI.R end
   line:SetText(text)
 end
 
@@ -423,7 +496,10 @@ local function followAuctionator(form)
   block:HookScript("OnHide", again)
 end
 
+local lastRetailInfo = nil -- the recipe the modern form shows, to draw again when the switch comes back
+
 local function describeRetail(form, recipeInfo)
+  lastRetailInfo = recipeInfo
   if not NS.Setting("crafting") or not recipeInfo or not recipeInfo.recipeID then
     if retailLine then retailLine:SetText("") end
     return
@@ -484,7 +560,7 @@ end
 -- The row sizes its name to the room left of the craftable count and the lock icon
 -- (ProfessionsRecipeListRecipeMixin:Init); the dot and sign take their share off the right, so a
 -- long name shortens instead of running under them. Set after Init, so it holds.
-local function fitLabel(frame)
+local function fitLabel(frame, without)
   local label = frame.Label
   if type(label) ~= "table" or not label.GetStringWidth or not frame.AHledgerSign then return end
   local shown = function(f) return type(f) == "table" and f.IsShown and f:IsShown() end
@@ -492,7 +568,8 @@ local function fitLabel(frame)
   local locked = shown(frame.LockedIcon) and (frame.LockedIcon:GetWidth() or 0) or 0
   local skill = (type(frame.SkillUps) == "table" and frame.SkillUps.GetWidth) and (frame.SkillUps:GetWidth() or 0) or 0
   local width = frame:GetWidth() or 0
-  local room = width - (locked + count + 10 + skill) - indicatorWidth(frame)
+  -- without: the dot has gone, so the name gets back the room it gave up.
+  local room = width - (locked + count + 10 + skill) - (without and 0 or indicatorWidth(frame))
   -- Measured at full width first, the way the row's own Init does, so a name already cut short
   -- reports its whole length.
   if width > 0 and label.SetWidth then label:SetWidth(width) end
@@ -516,6 +593,7 @@ local function onRowEnter(frame)
     fitLabel(frame)
   end
   local tip = GameTooltip
+  if tip:IsForbidden() then return end
   if tip:IsShown() and tip:GetOwner() == frame.Label then
     tip:AddLine(" ")
   else
@@ -523,9 +601,10 @@ local function onRowEnter(frame)
     tip:SetText(r.name or "", 1, 1, 1)
   end
   tip:AddLine(marginText(r.cost, r.total, r.margin, r.resultID), nil, nil, nil, true)
-  if r.missing and #r.missing > 0 then
-    tip:AddLine(UI.GREY .. "no price for " .. table.concat(r.missing, ", ") .. UI.R, nil, nil, nil, true)
-  end
+  local fromVendor = NS.VendorReagentsText(r.vendor)
+  if fromVendor then tip:AddLine(UI.GREY .. fromVendor .. UI.R, nil, nil, nil, true) end
+  local none = NS.MissingText(r.missing)
+  if none then tip:AddLine(UI.GREY .. none .. UI.R, nil, nil, nil, true) end
   tip:Show()
 end
 
@@ -542,6 +621,7 @@ local function hideDot(frame)
   if frame.AHledgerDot then
     frame.AHledgerDot:Hide()
     frame.AHledgerSign:SetText("")
+    pcall(fitLabel, frame, true)
   end
 end
 
@@ -589,8 +669,8 @@ function NS.DecorateRecipeRow(frame, node)
     return
   end
   ensureDot(frame)
-  local cost, missing, total, margin = economics(recipe.reagents, recipe.resultID, recipe.made, NS.Market())
-  recipe.cost, recipe.missing, recipe.total, recipe.margin = cost, missing, total, margin
+  local cost, missing, total, margin, vendor = economics(recipe.reagents, recipe.resultID, recipe.made, NS.Market())
+  recipe.cost, recipe.missing, recipe.total, recipe.margin, recipe.vendor = cost, missing, total, margin, vendor
   NS.RememberRecipe(recipe, currentProfession())
   frame.AHledgerRecipe = recipe
   frame.AHledgerBand = NS.MarginBand(recipe) or "unknown"
@@ -609,6 +689,44 @@ local function recipeScrollBox()
   local page = ProfessionsFrame and ProfessionsFrame.CraftingPage
   local list = page and page.RecipeList
   return list and list.ScrollBox or nil
+end
+
+-- Classic: the margin line for the recipe selected in the trade skill or craft window.
+local function showClassic(kind, index)
+  if not index or index < 1 then return end
+  if kind == CRAFT then
+    if not GetCraftNumReagents then return end
+    local parent = CraftDetailScrollChildFrame or CraftFrame
+    ensureLine(parent, CraftReagentLabel or parent, "AHledgerCraftLine")
+  else
+    if not GetTradeSkillNumReagents then return end
+    local parent = TradeSkillDetailScrollChildFrame or TradeSkillFrame
+    ensureLine(parent, TradeSkillReagentLabel or parent, "AHledgerCraftLine")
+  end
+  showLine(classicRecipe(kind, index))
+end
+
+local function shownFrame(f)
+  return type(f) == "table" and f.IsShown and f:IsShown()
+end
+
+-- Crafting margins switched off or on (by hand or by scanner only): the line under the open
+-- recipe goes, or comes back, now rather than at the next recipe picked.
+function NS.RefreshCraftLine()
+  if not NS.Setting("crafting") then
+    for _, l in pairs(lines) do pcall(l.SetText, l, "") end
+    if retailLine then pcall(retailLine.SetText, retailLine, "") end
+    return
+  end
+  if shownFrame(TradeSkillFrame) and GetTradeSkillSelectionIndex then
+    pcall(showClassic, TRADESKILL, GetTradeSkillSelectionIndex())
+  end
+  if shownFrame(CraftFrame) and GetCraftSelectionIndex then
+    pcall(showClassic, CRAFT, GetCraftSelectionIndex())
+  end
+  if retailForm and lastRetailInfo and retailForm.IsVisible and retailForm:IsVisible() then
+    pcall(describeRetail, retailForm, lastRetailInfo)
+  end
 end
 
 -- Every visible row again: after a setting change, and whenever the list lays itself out.
@@ -659,21 +777,11 @@ function NS.HookCrafting()
   if ProfessionsFrame then hookRecipeList() end
   if TradeSkillFrame and TradeSkillFrame_SetSelection and not hooked.tradeskill then
     hooked.tradeskill = true
-    hooksecurefunc("TradeSkillFrame_SetSelection", function(index)
-      if not index or index < 1 or not GetTradeSkillNumReagents then return end
-      local parent = TradeSkillDetailScrollChildFrame or TradeSkillFrame
-      ensureLine(parent, TradeSkillReagentLabel or parent, "AHledgerCraftLine")
-      showLine(classicRecipe(TRADESKILL, index))
-    end)
+    hooksecurefunc("TradeSkillFrame_SetSelection", function(index) showClassic(TRADESKILL, index) end)
   end
   if CraftFrame and CraftFrame_SetSelection and not hooked.craft then
     hooked.craft = true
-    hooksecurefunc("CraftFrame_SetSelection", function(index)
-      if not index or index < 1 or not GetCraftNumReagents then return end
-      local parent = CraftDetailScrollChildFrame or CraftFrame
-      ensureLine(parent, CraftReagentLabel or parent, "AHledgerCraftLine")
-      showLine(classicRecipe(CRAFT, index))
-    end)
+    hooksecurefunc("CraftFrame_SetSelection", function(index) showClassic(CRAFT, index) end)
   end
 end
 
@@ -700,7 +808,8 @@ local function refreshShopping()
   end
   local out = {}
   for _, l in ipairs(lines) do
-    out[#out + 1] = string.format("%d × %s  %s", l.short, l.name, l.cost and (UI.GREY .. NS.Gold(l.cost) .. UI.R) or (UI.GREY .. "no price" .. UI.R))
+    local price = l.cost and (UI.GREY .. NS.Gold(l.cost) .. (l.vendor and "  from a vendor" or "") .. UI.R) or (UI.GREY .. "no price" .. UI.R)
+    out[#out + 1] = string.format("%d × %s  %s", l.short, l.name, price)
   end
   out[#out + 1] = "Total " .. NS.Gold(total) .. (unknown > 0 and (UI.GREY .. string.format("  (%d reagent%s unpriced)", unknown, unknown == 1 and "" or "s") .. UI.R) or "")
   tab.shopText:SetText(table.concat(out, "\n"))
@@ -813,7 +922,10 @@ local function build(parent)
     onEnter = function(tt, row)
       if row.resultID then tt:SetItemByID(row.resultID) end
       tt:AddLine(UI.GREY .. "Ctrl+right-click for its ahledger.com page" .. UI.R)
-      if row.missing and #row.missing > 0 then tt:AddLine(UI.GREY .. "No price for " .. table.concat(row.missing, ", ") .. UI.R, nil, nil, nil, true) end
+      local fromVendor = NS.VendorReagentsText(row.vendor)
+      if fromVendor then tt:AddLine(UI.GREY .. fromVendor:sub(1, 1):upper() .. fromVendor:sub(2) .. UI.R, nil, nil, nil, true) end
+      local none = NS.MissingText(row.missing)
+      if none then tt:AddLine(UI.GREY .. none:sub(1, 1):upper() .. none:sub(2) .. UI.R, nil, nil, nil, true) end
       if row.profitDay then
         tt:AddLine(UI.GREY .. "Profit/day: the margin per item times the units the market buys a day, the most a crafter supplying all of it could make." .. UI.R, nil, nil, nil, true)
       end

@@ -14,6 +14,8 @@ local built = {}
 local WIDTH, HEIGHT = 700, 620
 local CONTENT_TOP = -104
 local CONTENT_BOTTOM = 46
+-- The height of a tab's body: the window less the header above it and the button bar below.
+local OPTIONS_BODY_H = HEIGHT + CONTENT_TOP - 8 - CONTENT_BOTTOM
 
 function NS.WindowShowing(key)
   return window ~= nil and window:IsShown() and (key == nil or current == key)
@@ -137,21 +139,32 @@ local function buildOptions(parent)
   optionsTab.checks = {}
   local options = NS.OPTIONS or {}
   local perColumn = math.ceil(#options / 2)
+  -- The switches scroll (0.14.1): two columns of 23 no longer fit the tab, and the last rows used
+  -- to sit under the window's own buttons or below its edge. The status lines stay put below.
+  local STATUS_H = 50
+  local viewH = OPTIONS_BODY_H - 26 - STATUS_H
+  local scroll = CreateFrame("ScrollFrame", "AHledgerOptionsScroll", parent, "UIPanelScrollFrameTemplate")
+  scroll:SetPoint("TOPLEFT", 0, -26)
+  scroll:SetSize(668 - 26, viewH)
+  local content = CreateFrame("Frame", nil, scroll)
+  content:SetSize(668 - 26, perColumn * 24 + 4)
+  scroll:SetScrollChild(content)
+  optionsTab.scroll = scroll
   for i, o in ipairs(options) do
     local col = i <= perColumn and 0 or 1
     local rowIndex = col == 0 and (i - 1) or (i - 1 - perColumn)
-    local cb = CreateFrame("CheckButton", nil, parent, "UICheckButtonTemplate")
+    local cb = CreateFrame("CheckButton", nil, content, "UICheckButtonTemplate")
     cb:SetSize(24, 24)
-    cb:SetPoint("TOPLEFT", -4 + col * 334, -30 - rowIndex * 24)
+    cb:SetPoint("TOPLEFT", col * 322, -4 - rowIndex * 24)
     local label = cb:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     label:SetPoint("LEFT", cb, "RIGHT", 2, 0)
-    label:SetWidth(300)
+    label:SetWidth(290)
     label:SetJustifyH("LEFT")
     label:SetText(o.short or o.label)
     cb.key = o.key
     cb:SetScript("OnClick", function(self) NS.SetSetting(self.key, self:GetChecked() and true or false) end)
     cb:SetScript("OnEnter", function(self)
-      if o.tip == "" then return end
+      if o.tip == "" or GameTooltip:IsForbidden() then return end
       GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
       GameTooltip:SetText(o.label, 1, 1, 1)
       GameTooltip:AddLine(o.tip, 0.8, 0.8, 0.8, true)
@@ -160,7 +173,7 @@ local function buildOptions(parent)
     cb:SetScript("OnLeave", function() GameTooltip:Hide() end)
     optionsTab.checks[#optionsTab.checks + 1] = cb
   end
-  local y = -30 - perColumn * 24 - 12
+  local y = -26 - viewH - 8
   optionsTab.status = UI.Muted(parent, "", 0, y, 668)
   optionsTab.status:SetSpacing(2)
 end
@@ -169,7 +182,7 @@ local function refreshOptions()
   if not optionsTab.checks then return end
   for _, cb in ipairs(optionsTab.checks) do cb:SetChecked(NS.Setting(cb.key) and true or false) end
   local lines = { NS.PersistStatus and NS.PersistStatus() or "" }
-  lines[#lines + 1] = "Version " .. NS.VERSION .. ". Slash commands: /ahl, /ahl scan, /ahl link, /ahl pace, /ahl import, /ahl watch, /ahl bar, /ahl set, /ahl market, /ahl status."
+  lines[#lines + 1] = "Version " .. NS.VERSION .. ". Slash commands: /ahl, /ahl scan, /ahl link, /ahl pace, /ahl import, /ahl watch, /ahl bar, /ahl scanner, /ahl set, /ahl market, /ahl status."
   optionsTab.status:SetText(table.concat(lines, "\n"))
 end
 
@@ -368,10 +381,15 @@ local function statusLines(tt)
     for i = 1, #help - 1 do tt:AddLine(help[i], 0.7, 0.7, 0.72, true) end
   end
   if NS.ScanStatusLines then NS.ScanStatusLines(tt) end
-  local n = 0
-  for _ in pairs(NS.Db().watch or {}) do n = n + 1 end
-  tt:AddLine(string.format("%d watched item%s", n, n == 1 and "" or "s"), 1, 1, 1)
-  if NS.DashboardLines then NS.DashboardLines(tt, nil, NS.TableIsSeed(market)) end
+  if NS.IsScannerOnly and NS.IsScannerOnly() then
+    -- The way back, and nothing of the interface the player turned off.
+    tt:AddLine(NS.ScannerOnlyStatusText(), 1, 0.82, 0.25, true)
+  else
+    local n = 0
+    for _ in pairs(NS.Db().watch or {}) do n = n + 1 end
+    tt:AddLine(string.format("%d watched item%s", n, n == 1 and "" or "s"), 1, 1, 1)
+    if NS.DashboardLines then NS.DashboardLines(tt, nil, NS.TableIsSeed(market)) end
+  end
   tt:AddLine(UI.GREY .. "Left-click: window. Right-click: scan. Drag to move." .. UI.R)
 end
 
@@ -455,6 +473,7 @@ function NS.RefreshMinimap()
       end
     end)
     minimapButton:SetScript("OnEnter", function(self)
+      if GameTooltip:IsForbidden() then return end
       GameTooltip:SetOwner(self, "ANCHOR_LEFT")
       statusLines(GameTooltip)
       GameTooltip:Show()

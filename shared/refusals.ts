@@ -27,6 +27,17 @@ export function refusalAdvice(
   const r = (reason || '').toLowerCase();
   const skew = skewSeconds ?? null;
   if (status === 401) {
+    // The server names the key when the secret sent belongs to another key on the account. That
+    // signature verified with the request's own time, so the clock is not the problem, whatever
+    // the skew; only a "clock window" refusal is about the clock for certain.
+    const other = /bad signature: the secret belongs to your key (ahl_[a-z0-9]{16})/.exec(r)?.[1];
+    if (other && !r.includes('clock window')) {
+      return {
+        summary: `the secret is from your other key ${other}, not from this key id`,
+        remedy: `press Connect with ahledger.com in AHledger sync, which makes a new key and fills in both its key id and secret, then revoke the keys you no longer use on ${ACCOUNT}`,
+        permanent: false,
+      };
+    }
     if (r.includes('clock window') || (skew !== null && Math.abs(skew) > 120)) {
       const minutes = skew === null ? null : Math.round(Math.abs(skew) / 60);
       const off =
@@ -41,9 +52,10 @@ export function refusalAdvice(
       };
     }
     if (r.includes('bad signature')) {
+      // A secret is shown once, so pasting it again is rarely possible: Connect, or a new key.
       return {
         summary: 'the secret does not match this key id',
-        remedy: `paste the key id and secret again from ${ACCOUNT}, or create a new key there`,
+        remedy: `press Connect with ahledger.com in AHledger sync, or create a new key on ${ACCOUNT} and paste its key id and secret`,
         permanent: false,
       };
     }
@@ -80,8 +92,8 @@ export function refusalAdvice(
     }
     if (r.includes('older than')) {
       return {
-        summary: 'this scan is older than the server keeps',
-        remedy: 'run a new scan in game',
+        summary: 'this scan is more than 7 days old, older than the server accepts',
+        remedy: 'nothing to fix; run a new scan in game and it uploads normally',
         permanent: true,
       };
     }

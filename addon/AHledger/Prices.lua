@@ -7,7 +7,8 @@
     <item id>:<median>:<min buyout>:<quantity>:<median 7d>:<median 30d>:<low 30d>:<high 30d>:<sold a day x10>
 
   Prices are copper; an empty field is unknown. The ninth field (from 0.9.0) is the estimated
-  units sold a day times ten, which the sell pace reads; tables without it simply have no pace. The string is parsed into a lookup on first use
+  units sold a day times ten, which the sell pace reads; a table without it has no pace, and from
+  0.14.5 the tooltip says so (NS.MarketPaced). The string is parsed into a lookup on first use
   and cached, so loading costs nothing until a tooltip asks for a price.
 ]]
 local ADDON_NAME, NS = ...
@@ -15,8 +16,9 @@ local ADDON_NAME, NS = ...
 local FORMAT = "AHL1"
 local cache = {} -- market -> { updated = n, count = n, items = { [id] = row } }
 
+-- Returns the rows read and how many carry a sales estimate.
 local function parseRows(text, into)
-  local n = 0
+  local n, paced = 0, 0
   for line in text:gmatch("[^\n;]+") do
     local id, median, min, qty, m7, m30, lo, hi, sold = line:match("^(%d+):(%d*):(%d*):(%d*):(%d*):(%d*):(%d*):(%d*):?(%d*)")
     if id then
@@ -36,9 +38,10 @@ local function parseRows(text, into)
         perDay = sold and sold / 10 or nil,
       }
       n = n + 1
+      if sold then paced = paced + 1 end
     end
   end
-  return n
+  return n, paced
 end
 
 -- Parses a full table (header and rows). Returns market, updated, items, count or nil, error.
@@ -84,8 +87,11 @@ function NS.TableFor(market)
   if not src then return nil end
   if c and c.updated == src.updated then return c end
   local items = {}
-  local n = parseRows(src.text, items)
-  c = { updated = src.updated or 0, count = n, items = items, market = market, seed = src.seed and true or false }
+  local n, paced = parseRows(src.text, items)
+  -- A pasted table, for /ahl pace: like the snapshot, it cannot gain speeds by itself.
+  local db = NS.Db()
+  local imported = db.tables ~= nil and db.tables[market] == src
+  c = { updated = src.updated or 0, count = n, paced = paced, items = items, market = market, seed = src.seed and true or false, imported = imported }
   cache[market] = c
   return c
 end
@@ -408,6 +414,27 @@ function NS.Pace(row)
   return { tier = tier, perDay = perDay, days = days }
 end
 
+-- Whether the market's table carries sales estimates (0.14.5): true, false when it has none at
+-- all, nil without a table. ahledger.com states them for a house only once it has 6 hours of
+-- scan pairs (full scans 20 to 60 minutes apart) in the last week, so a thinly scanned house
+-- has no estimate for any item, and the tooltip used to say nothing, which read as a fault.
+function NS.MarketPaced(market)
+  local t = NS.TableFor(market or NS.Market())
+  if not t then return nil end
+  return (t.paced or 0) > 0
+end
+
+-- What the tooltip and the posting panel say in place of a pace on such a house.
+NS.PACE_MISSING = "AH sales: no speed yet, not enough close scans here"
+-- On the snapshot that ships with the addon the snapshot is the reason, whatever the house has now.
+NS.PACE_MISSING_SEED = "AH sales: no speed in the shipped snapshot"
+NS.PACE_MISSING_SHORT = "no sales speed yet"
+
+-- The full line for a house without estimates, by the table in use.
+function NS.PaceMissingText(seed)
+  return (seed and NS.PACE_MISSING_SEED or NS.PACE_MISSING) .. " (/ahl pace)"
+end
+
 -- The words are the same on ahledger.com: say what is measured (auction house sales) and how fast.
 local PACE_WORD = { fast = "Sells fast", steady = "Sells steadily", slow = "Sells slowly", barely = "Barely sells" }
 -- For a column headed "AH sales".
@@ -460,13 +487,25 @@ function NS.PaceText(p)
   return PACE_WORD[p.tier] .. " on the AH: " .. NS.SoldText(p.perDay) .. (stock and (", " .. stock) or "")
 end
 
--- What /ahl pace prints: what the line means and where it comes from.
-function NS.PaceHelp()
-  return {
+-- What /ahl pace prints: what the line means and where it comes from, and on a house without
+-- estimates (0.14.5) why there are none and what brings them.
+function NS.PaceHelp(market)
+  market = market or NS.Market()
+  local out = {
     "Auction house sales speed: how fast an item sells on your auction house, estimated by ahledger.com from players' scans over the last week.",
     "Sells fast: what is listed now clears in under a day. Sells steadily: within 3 days. Sells slowly: within 2 weeks. Barely sells: longer, or none sold this week.",
     "\"~200 sold a day\" is the estimate; it leans low. Switch it off with /ahl set tooltipPace off and /ahl set barPace off.",
   }
+  if NS.MarketPaced(market) == false then
+    out[#out + 1] = string.format("%s has no sales speeds yet. They are worked out from full scans taken 20 to 60 minutes apart, and most scans here come further apart than that. To help: with AHledger sync running, scan the auction house, then scan again 20 to 60 minutes later. Once the house has about 6 hours of such scans in a week, the speeds show after a /reload.", NS.MarketLabel and NS.MarketLabel(market) or market)
+    local t = NS.TableFor(market)
+    if t and t.seed then
+      out[#out + 1] = "These prices are the snapshot that ships with the addon, which cannot gain speeds by itself. Install AHledger sync for live tables: ahledger.com/download"
+    elseif t and t.imported then
+      out[#out + 1] = "These prices are a pasted table, which cannot gain speeds by itself. Paste a fresh one from ahledger.com, or use AHledger sync, to get any speeds the site has now."
+    end
+  end
+  return out
 end
 
 -- How long a quantity would take to sell at the auction house's pace, for the posting panel:

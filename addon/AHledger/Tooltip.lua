@@ -43,12 +43,36 @@ end
 --
 --   AHledger · PvP Horde          4g   +81%   3 listed
 --   Auction it   vendor pays 55s 68c
+-- Buy from a vendor (0.14.1): a vendor is known to sell it for gold for less than a buyer
+-- would pay on the house (the lowest listing, or the median without one), so a reagent such as
+-- Leaded Vial reads as a vendor buy. Only for items the house prices: vendor food and water
+-- nobody lists would get the line on every tooltip. In the compact block too. Pure.
+local function cheaperLine(ctx)
+  local row = ctx.row
+  local buyAt = row and (tonumber(row.min) or row.median) or nil
+  if ctx.setting("tooltipVendor") and ctx.vendorSells and ctx.vendorSells > 0 and buyAt and ctx.vendorSells < buyAt then
+    return UP .. "Buy from a vendor" .. R .. GREY .. ": " .. R .. WHITE .. NS.Gold(ctx.vendorSells) .. R
+  end
+  return nil
+end
+
 local function compactBlock(ctx)
   local out = {}
   local label = ctx.marketLabel and ("AHledger · " .. ctx.marketLabel) or "AHledger"
   local row = ctx.row
   if row then
     local parts = { WHITE .. NS.Gold(row.median) .. R }
+    -- Lead with the lowest (0.14.1, option tooltipLeadLowest): the price a buyer pays now, then
+    -- the median it is judged against, both labelled since neither is the usual bare number.
+    local low = NS.TooltipLowest(row, ctx.setting)
+    if low and low == row.median then
+      parts = { GREY .. "lowest and median " .. R .. WHITE .. NS.Gold(low) .. R }
+    elseif low then
+      parts = { GREY .. "lowest " .. R .. WHITE .. NS.Gold(low) .. R, GREY .. "median " .. R .. WHITE .. NS.Gold(row.median) .. R }
+    elseif ctx.setting("tooltipMin") and tonumber(row.min) and row.min < row.median then
+      -- The lowest beside the median in the short block too: it is the price a buyer pays.
+      parts[#parts + 1] = GREY .. "lowest " .. R .. WHITE .. NS.Gold(row.min) .. R
+    end
     if ctx.setting("tooltipChange") then
       local change = pct(row.median, row.m7)
       if change and math.abs(change) >= 0.5 then
@@ -69,6 +93,11 @@ local function compactBlock(ctx)
   -- The sell pace rides on the verdict line: "Auction it · sells fast".
   local pace = ctx.setting("tooltipPace") and NS.Pace(row) or nil
   local paced = pace and (GREY .. " · " .. R .. NS.PaceColour(pace.tier) .. NS.PacePhrase(pace.tier) .. R) or ""
+  -- A house with no estimates at all says so (0.14.5), rather than leaving the pace out unseen;
+  -- short, and only where selling on the AH is the advice. /ahl pace and the full block explain.
+  if row and not pace and ctx.paceMissing and ctx.setting("tooltipPace") and (verdict == "auction" or verdict == "either") then
+    paced = GREY .. " · " .. NS.PACE_MISSING_SHORT .. R
+  end
   if verdict == "auction" then
     out[#out + 1] = { "line", UP .. "Auction it" .. R .. paced .. (vendor and (GREY .. "   vendor pays " .. NS.Gold(vendor) .. R) or "") }
   elseif verdict == "vendor" then
@@ -78,6 +107,8 @@ local function compactBlock(ctx)
   elseif pace then
     out[#out + 1] = { "line", NS.PaceColour(pace.tier) .. NS.PaceText(pace) .. R }
   end
+  local cheaper = cheaperLine(ctx)
+  if cheaper then out[#out + 1] = { "line", cheaper } end
   if ctx.setting("tooltipBags") and ctx.owned then out[#out + 1] = { "line", GREY .. ctx.owned .. R } end
   if ctx.shiftHint then out[#out + 1] = { "line", GREY .. "Hold Shift for the full block" .. R } end
   return out
@@ -135,12 +166,22 @@ function NS.TooltipBlock(ctx)
   local row = ctx.row
   if row then
     out[#out + 1] = { "double", "|cffff9d2f" .. label .. "|r", ageText(ctx) }
-    local price = { string.format("%sMedian %s%s", WHITE, NS.Gold(row.median), R) }
+    local price
+    local low = NS.TooltipLowest(row, ctx.setting)
+    if low and low == row.median then
+      price = { string.format("%sLowest and median %s%s", WHITE, NS.Gold(low), R) }
+    elseif low then
+      price = { string.format("%sLowest %s%s", WHITE, NS.Gold(low), R), string.format("%smedian %s%s%s%s", GREY, R, WHITE, NS.Gold(row.median), R) }
+    else
+      price = { string.format("%sMedian %s%s", WHITE, NS.Gold(row.median), R) }
+    end
     if ctx.setting("tooltipQuantity") and row.qty and row.qty > 0 then
       price[#price + 1] = string.format("%s%d listed%s", GREY, row.qty, R)
     end
-    if ctx.setting("tooltipMin") and row.min and row.min ~= row.median then
-      price[#price + 1] = string.format("%slowest %s%s", GREY, NS.Gold(row.min), R)
+    -- The lowest buyout, in white since 0.14.1: it is the price a buyer pays, and grey read as a
+    -- footnote. Left out when it equals the median, and when it already leads the line.
+    if not low and ctx.setting("tooltipMin") and row.min and row.min ~= row.median then
+      price[#price + 1] = string.format("%slowest %s%s%s%s", GREY, R, WHITE, NS.Gold(row.min), R)
     end
     out[#out + 1] = { "line", table.concat(price, "   ") }
     if ctx.setting("tooltipChange") then
@@ -154,7 +195,11 @@ function NS.TooltipBlock(ctx)
     end
     -- Sell pace: "Sells fast: ~36,000 a day, under a day of stock".
     local pace = ctx.setting("tooltipPace") and NS.Pace(row) or nil
-    if pace then out[#out + 1] = { "line", NS.PaceColour(pace.tier) .. NS.PaceText(pace) .. R } end
+    if pace then
+      out[#out + 1] = { "line", NS.PaceColour(pace.tier) .. NS.PaceText(pace) .. R }
+    elseif ctx.paceMissing and ctx.setting("tooltipPace") then
+      out[#out + 1] = { "line", GREY .. NS.PaceMissingText(ctx.seedDate ~= nil) .. R }
+    end
   elseif ctx.hasTable then
     out[#out + 1] = { "double", "|cffff9d2f" .. label .. "|r", ageText(ctx) }
     out[#out + 1] = { "line", GREY .. "Not listed on " .. (ctx.marketLabel or "this market") .. R }
@@ -162,19 +207,32 @@ function NS.TooltipBlock(ctx)
     out[#out + 1] = { "double", "|cffff9d2fAHledger|r", GREY .. "no price table (/ahl import)" .. R }
   end
   -- Craft or buy (0.10.0): the remembered recipe's reagent cost against the median.
-  if ctx.craft then out[#out + 1] = { "line", ctx.craft } end
+  -- Wrapped: with a profession, unpriced reagents and vendor ones it runs past a tooltip's width.
+  if ctx.craft then out[#out + 1] = { "wrap", ctx.craft } end
+  local cheaper = cheaperLine(ctx)
+  if cheaper then out[#out + 1] = { "line", cheaper } end
   -- The other faction and the cheapest house in the region (0.10.0).
   for _, l in ipairs(ctx.markets or {}) do out[#out + 1] = { "line", l } end
   local tail = {}
   if ctx.setting("tooltipVendor") and ctx.vendor and ctx.vendor > 0 then
     tail[#tail + 1] = "Vendor pays " .. NS.Gold(ctx.vendor)
   end
+
   if ctx.setting("tooltipDisenchant") and ctx.disenchant then
     tail[#tail + 1] = "Disenchant ~" .. NS.Gold(ctx.disenchant)
   end
   if ctx.setting("tooltipBags") and ctx.owned then tail[#tail + 1] = ctx.owned end
   if #tail > 0 then out[#out + 1] = { "line", GREY .. table.concat(tail, "   ") .. R } end
   return out
+end
+
+-- The lowest buyout to lead the price line with, or nil: only with the option on, and only when
+-- the row has one. Pure.
+function NS.TooltipLowest(row, setting)
+  if not row or not setting or not setting("tooltipLeadLowest") then return nil end
+  local low = tonumber(row.min)
+  if not low or low <= 0 or not row.median then return nil end
+  return low
 end
 
 -- Whether the block goes on tooltips right now: the option is on, and when the Shift-only
@@ -209,11 +267,20 @@ local function addLines(tooltip, itemID, link)
     row = row, hasTable = t ~= nil or own, marketLabel = NS.MarketLabel(market), age = NS.TableAge(market),
     ownScan = own,
     vendor = vendor, disenchant = de, owned = owned, setting = NS.Setting,
+    vendorSells = NS.VendorPrice and (NS.VendorPrice(itemID)) or nil,
     compact = compact, craft = craft, markets = markets,
     shiftHint = compact and NS.Setting("tooltipShiftMore") and not NS.Setting("tooltipCompact") and true or false,
     seedDate = (t and t.seed and not own) and NS.TableDate(market) or nil,
+    -- The table NS.Price already found, so a hover looks it up once (NS.MarketPaced, inlined).
+    paceMissing = t ~= nil and (t.paced or 0) == 0,
   })) do
-    if l[1] == "double" then tooltip:AddDoubleLine(l[2], l[3]) else tooltip:AddLine(l[2]) end
+    if l[1] == "double" then
+      tooltip:AddDoubleLine(l[2], l[3])
+    elseif l[1] == "wrap" then
+      tooltip:AddLine(l[2], nil, nil, nil, true)
+    else
+      tooltip:AddLine(l[2])
+    end
   end
   tooltip:Show()
 end

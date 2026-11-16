@@ -4,6 +4,7 @@
 //! SavedVariables watcher, request signing, and the HTTPS upload. The webview parses the Lua file
 //! and decides what to send; it never receives the secret back after the user types it.
 
+mod background;
 use std::{
     fs,
     io::Write,
@@ -39,6 +40,11 @@ pub struct Settings {
     /// Stands in when the client recorded the region as "unknown" (beta and PTR builds do).
     pub region: String,
     pub auto_upload: bool,
+    /// Off unless the player turns it on (0.2.29): closing or minimizing hides the window to
+    /// the notification area instead of quitting. See background.rs.
+    pub run_in_background: bool,
+    /// Off unless the player turns it on (0.2.29), Windows only: start at sign-in.
+    pub start_with_windows: bool,
 }
 
 impl Settings {
@@ -98,6 +104,9 @@ struct AppState {
     /// The token of a Connect request in progress. It stays on the native side: the webview only
     /// ever sees the code to show and the result.
     pair_token: Mutex<Option<String>>,
+    /// Held around every read-change-write of settings.json (the form, the background
+    /// options, a Connect approval), so two writers never drop each other's change.
+    settings_lock: Mutex<()>,
 }
 
 fn err<E: std::fmt::Display>(e: E) -> String {
@@ -135,6 +144,14 @@ pub struct PublicSettings {
     pub game: String,
     pub region: String,
     pub auto_upload: bool,
+    pub run_in_background: bool,
+    pub start_with_windows: bool,
+    /// Set once when the startup entry was found missing while the settings had it on (a new
+    /// setup removes the old copy's entry; Task Manager can too): the box is unticked to match.
+    pub startup_entry_removed: bool,
+    /// The entry is there but turned off in Task Manager or Settings > Apps > Startup, so it
+    /// will not start; only the player can turn it back on there.
+    pub startup_disabled_by_windows: bool,
 }
 
 impl From<Settings> for PublicSettings {
@@ -147,13 +164,54 @@ impl From<Settings> for PublicSettings {
             game: s.game,
             region: s.region,
             auto_upload: s.auto_upload,
+            // What is in force, not only what was saved: if the icon could not be made at
+            // start, the app is a normal window and the box says so.
+            run_in_background: s.run_in_background && background::run_in_background(),
+            start_with_windows: s.start_with_windows,
+            startup_entry_removed: false,
+            startup_disabled_by_windows: false,
         }
     }
 }
 
 #[tauri::command]
-fn get_settings(app: AppHandle) -> Result<PublicSettings, String> {
-    load_settings(&app).map(PublicSettings::from)
+fn get_settings(app: AppHandle, state: State<'_, AppState>) -> Result<PublicSettings, String> {
+    let _lock = state.settings_lock.lock().map_err(|_| "settings lock poisoned".to_string())?;
+    let mut settings = load_settings(&app)?;
+    let removed = reconcile_startup_entry(&app, &mut settings)?;
+    Ok(public_settings(settings, removed))
+}
+
+/// Matches the saved startup option to the registry, never by writing an entry: if the option is
+/// on but the entry is gone (an update or reinstall removes it; so can a cleanup tool), the
+/// option is saved as off and true is returned so the window can say so; if the option is off
+/// but an entry is there (left by an interrupted save), the entry is deleted. An answer the
+/// registry could not give changes nothing.
+fn reconcile_startup_entry(app: &AppHandle, settings: &mut Settings) -> Result<bool, String> {
+    if !cfg!(windows) {
+        return Ok(false);
+    }
+    match background::start_with_windows_present() {
+        Some(false) if settings.start_with_windows => {
+            settings.start_with_windows = false;
+            let json = serde_json::to_string_pretty(&*settings).map_err(err)?;
+            write_private(&settings_path(app)?, &json)?;
+            Ok(true)
+        }
+        Some(true) if !settings.start_with_windows => {
+            let _ = background::set_start_with_windows(false);
+            Ok(false)
+        }
+        _ => Ok(false),
+    }
+}
+
+fn public_settings(settings: Settings, startup_entry_removed: bool) -> PublicSettings {
+    let on = settings.start_with_windows;
+    let mut public = PublicSettings::from(settings);
+    public.startup_entry_removed = startup_entry_removed;
+    public.startup_disabled_by_windows = on && background::start_with_windows_disabled_by_windows();
+    public
 }
 
 /// Writes `contents` to `<path>.<tmp_ext>` and renames that over `path`, so a reader never sees
@@ -202,16 +260,26 @@ fn keep_stored_secret(next: &mut Settings, stored: &Settings) {
 /// Saves the form. The webview never has the secret (see keep_stored_secret). Only https API
 /// endpoints are accepted in release builds.
 #[tauri::command]
-fn save_settings(app: AppHandle, settings: Settings) -> Result<PublicSettings, String> {
+fn save_settings(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    settings: Settings,
+) -> Result<PublicSettings, String> {
+    let _lock = state.settings_lock.lock().map_err(|_| "settings lock poisoned".to_string())?;
     let mut next = settings.with_defaults();
-    keep_stored_secret(&mut next, &load_settings(&app)?);
+    let stored = load_settings(&app)?;
+    keep_stored_secret(&mut next, &stored);
+    // The background options are not on the form; they change only through
+    // set_background_options, which also applies them.
+    next.run_in_background = stored.run_in_background;
+    next.start_with_windows = stored.start_with_windows;
     if !next.api_url.starts_with("https://") && !cfg!(debug_assertions) {
         return Err("the API address must start with https://".to_string());
     }
     let path = settings_path(&app)?;
     let json = serde_json::to_string_pretty(&next).map_err(err)?;
     write_private(&path, &json)?;
-    Ok(PublicSettings::from(next))
+    Ok(public_settings(next, false))
 }
 
 /// Look for `WTF/Account/*/SavedVariables/AHledger.lua` under the usual install locations.
@@ -743,12 +811,15 @@ async fn pair_poll(app: AppHandle, state: State<'_, AppState>) -> Result<PairRes
         if !upload_key_ok(&key_id, &secret) {
             return Err("the site sent a key in a shape sync does not recognise; nothing was saved".to_string());
         }
-        let mut settings = load_settings(&app)?;
-        settings.key_id = key_id.clone();
-        settings.secret = secret;
-        let path = settings_path(&app)?;
-        let json = serde_json::to_string_pretty(&settings).map_err(err)?;
-        write_private(&path, &json)?;
+        {
+            let _lock = state.settings_lock.lock().map_err(|_| "settings lock poisoned".to_string())?;
+            let mut settings = load_settings(&app)?;
+            settings.key_id = key_id.clone();
+            settings.secret = secret;
+            let path = settings_path(&app)?;
+            let json = serde_json::to_string_pretty(&settings).map_err(err)?;
+            write_private(&path, &json)?;
+        }
         let mut guard = state.pair_token.lock().map_err(|_| "pair lock poisoned".to_string())?;
         *guard = None;
         return Ok(pair_result("approved", Some(key_id), None));
@@ -1372,11 +1443,99 @@ fn render_price_table(
     Ok(Some((lua, rows.len(), updated)))
 }
 
+/// Turns the background options on or off: each is applied first (the notification-area icon,
+/// the Windows startup entry) and saved only once that worked, so the file never claims what
+/// is not so. Both start off; this is the only place either is turned on.
+#[tauri::command]
+fn set_background_options(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    run_in_background: Option<bool>,
+    start_with_windows: Option<bool>,
+) -> Result<PublicSettings, String> {
+    let _lock = state.settings_lock.lock().map_err(|_| "settings lock poisoned".to_string())?;
+    let mut next = load_settings(&app)?;
+    let mut problem: Option<String> = None;
+    // The startup entry is touched only when its own box was clicked: changing the other box
+    // never writes it, so an entry removed while the window was open stays removed.
+    let mut removed = false;
+    match start_with_windows.map(|v| v && cfg!(windows)) {
+        Some(true) => {
+            // Written when ticked and not already there (or not yet saved as on).
+            if !next.start_with_windows || background::start_with_windows_present() != Some(true) {
+                match background::set_start_with_windows(true) {
+                    Ok(()) => next.start_with_windows = true,
+                    Err(e) => problem = Some(e),
+                }
+            }
+        }
+        Some(false) => {
+            // Unticked: always removed, even if an earlier save never recorded it as on.
+            match background::set_start_with_windows(false) {
+                Ok(()) => next.start_with_windows = false,
+                Err(e) => problem = Some(e),
+            }
+        }
+        None => removed = reconcile_startup_entry(&app, &mut next)?,
+    }
+    if let Some(wanted) = run_in_background {
+        // Compared with what is in force, so ticking again retries an icon that failed at start.
+        if wanted != background::run_in_background() {
+            match background::apply_run_in_background(&app, wanted) {
+                Ok(()) => next.run_in_background = wanted,
+                Err(e) => problem = problem.or(Some(e)),
+            }
+        } else {
+            next.run_in_background = wanted;
+        }
+    }
+    let path = settings_path(&app)?;
+    let json = serde_json::to_string_pretty(&next).map_err(err)?;
+    write_private(&path, &json)?;
+    match problem {
+        Some(e) => Err(e),
+        None => Ok(public_settings(next, removed)),
+    }
+}
+
+/// Brings the window back; the webview asks for it when a start in the notification area hit a
+/// problem the player needs to see.
+#[tauri::command]
+fn show_window(app: AppHandle) {
+    // Only when hidden or minimized: a window already in view is left as it is (no focus grab).
+    let out_of_view = app
+        .get_webview_window("main")
+        .map(|w| !w.is_visible().unwrap_or(true) || w.is_minimized().unwrap_or(false))
+        .unwrap_or(false);
+    if out_of_view {
+        background::show_main(&app);
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // A second copy brings the first one's window back and exits (background.rs).
+    if !background::claim_single_instance() {
+        return;
+    }
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState::default())
+        .on_window_event(background::on_window_event)
+        .setup(|app| {
+            let handle = app.handle();
+            background::listen_for_second_copy(handle);
+            let settings = load_settings(handle).unwrap_or_default();
+            if settings.run_in_background {
+                if let Err(e) = background::apply_run_in_background(handle, true) {
+                    eprintln!("background mode unavailable: {e}");
+                }
+            }
+            if let Some(window) = app.get_webview_window("main") {
+                background::show_on_start(&window, background::started_at_sign_in());
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             get_settings,
             save_settings,
@@ -1395,14 +1554,32 @@ pub fn run() {
             refresh_price_tables,
             pair_start,
             pair_poll,
-            pair_cancel
+            pair_cancel,
+            set_background_options,
+            show_window
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running AHledger sync");
+        .build(tauri::generate_context!())
+        .expect("error while building AHledger sync")
+        .run(|_app, _event| {
+            // macOS: clicking the Dock icon (or opening the app again) brings a hidden window back.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = _event {
+                background::show_main(_app);
+            }
+        });
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_settings_file_from_before_the_background_options_has_both_off() {
+        let old = r#"{"apiUrl":"https://api.ahledger.com","keyId":"ahl_abcdefghij012345","secret":"s","savedVariablesPath":"C:/x/AHledger.lua","game":"forever","region":"us","autoUpload":true}"#;
+        let s: super::Settings = serde_json::from_str(old).unwrap();
+        assert!(s.auto_upload);
+        assert!(!s.run_in_background);
+        assert!(!s.start_with_windows);
+    }
+
     #[test]
     fn table_downloads_carry_only_a_plain_upload_key_id() {
         use super::sync_key_headers;

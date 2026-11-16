@@ -24,6 +24,33 @@
 
   API.VERSION changes only when something here changes incompatibly; new functions and new
   fields are added without changing it.
+
+  Scanner only (0.14.3). An addon that shows AHledger's prices in its own interface can ask the
+  player to run AHledger as a scanner only: AHledger keeps scanning, AHledger sync keeps sending
+  the scans, and AHledger's tooltip lines, ledger bar, crafting margins and recipe dots, auction
+  house panels, bag dots, vendor and quest reward marks, watchlist alerts, links to ahledger.com
+  and chat summaries turn off. Nothing changes until the player says yes in AHledger's own
+  dialog, which opens about four seconds after the loading screen (later if a cinematic plays or
+  the player is in combat). With AHledger in your OptionalDeps (above), it has loaded before
+  your code runs:
+
+    if AHledgerAPI and AHledgerAPI.RequestScannerOnly then
+      local state = AHledgerAPI.RequestScannerOnly("Haggler", function(accepted, answer)
+        -- answer: "yes", "no", "later" (dialog closed with the X) or "on" (the player turned
+        -- it on another way while the question waited); accepted is true for yes and on
+      end)
+      -- state: "on", "asked", "declined", "later" or "invalid". The callback runs only for
+      -- "asked"; the other answers are final for this call.
+    end
+
+  Pass your own addon's folder name; the dialog names your addon by its toc Title. Ask once a
+  session (at PLAYER_LOGIN is fine). "declined" is kept: the player said no, or said yes and
+  later turned scanner only off themselves, so do not ask again; point them to /ahl scanner on
+  if they want it after all. "later" lasts until their next login. The player can turn it on or
+  off at any time (/ahl scanner on|off, or the first switch in /ahl options) and nothing tells
+  you, so read AHledgerAPI.IsScannerOnly() when you need to know. A player in scanner only may
+  still turn AHledger's own tooltip back on: AHledgerAPI.IsTooltipOn() says whether it draws its
+  price block, if you want to avoid showing the same prices twice.
 ]]
 local _, NS = ...
 
@@ -137,6 +164,32 @@ end
 --- AHledger's own version, e.g. "0.9.8".
 function API.GetAddonVersion()
   return NS.VERSION
+end
+
+--- True while AHledger runs as a scanner only (0.14.3).
+function API.IsScannerOnly()
+  return safe(NS.IsScannerOnly) or false
+end
+
+--- True while AHledger draws its own price block in item tooltips (0.14.3): false in scanner
+--- only, unless the player turned that switch back on.
+function API.IsTooltipOn()
+  return safe(function() return NS.Setting("tooltip") and true or false end) or false
+end
+
+--- Asks the player to run AHledger as a scanner only (0.14.3). addonName is the caller's folder
+--- name, as loaded. Returns:
+---   "on"       already on
+---   "asked"    the player will see AHledger's dialog, now or once loading, a cinematic or
+---              combat is over; callback(accepted, answer) runs once: answer "yes", "no",
+---              "later" (closed with the X, accepted false) or "on" (turned on another way
+---              meanwhile, accepted true)
+---   "declined" the player said no to this addon, or turned scanner only off after saying yes
+---   "later"    the player closed the dialog; ask again after their next login
+---   "invalid"  addonName is not a loaded addon, or callback is not a function
+--- The callback runs only for "asked". An error in it goes to the game's error handler.
+function API.RequestScannerOnly(addonName, callback)
+  return safe(NS.RequestScannerOnly, addonName, callback) or "invalid"
 end
 
 -- Read-only: another addon cannot replace a function here and break every addon after it.

@@ -44,10 +44,28 @@ interface Settings {
   /** Used when the client recorded the region as "unknown" (beta and PTR builds do). */
   region: string;
   autoUpload: boolean;
+  /** Off unless turned on (0.2.29): close and minimize hide to the notification area. */
+  runInBackground: boolean;
+  /** Off unless turned on (0.2.29), Windows only: start at sign-in. */
+  startWithWindows: boolean;
+  /** True once when the startup entry was found gone and the box was unticked to match. */
+  startupEntryRemoved?: boolean;
+  /** The entry is there but turned off in Task Manager or Settings, so it will not start. */
+  startupDisabledByWindows?: boolean;
 }
 
-/** What the form sends; an empty secret keeps the stored one. */
-interface SettingsInput extends Omit<Settings, 'hasSecret'> {
+/**
+ * What the form sends; an empty secret keeps the stored one. The background options are not on
+ * the form: they are saved, and applied, by set_background_options the moment they change.
+ */
+interface SettingsInput extends Omit<
+  Settings,
+  | 'hasSecret'
+  | 'runInBackground'
+  | 'startWithWindows'
+  | 'startupEntryRemoved'
+  | 'startupDisabledByWindows'
+> {
   secret: string;
 }
 
@@ -128,7 +146,7 @@ interface RefreshResult {
   pvpError?: string | null;
 }
 
-const VERSION = '0.2.28';
+const VERSION = '0.2.29';
 /** Where the saved-variables file sits, written the way this system writes paths. */
 const PATH_EXAMPLE = /Macintosh|Mac OS X/.test(navigator.userAgent)
   ? '/Applications/World of Warcraft/…/WTF/Account/ACCOUNT/SavedVariables/AHledger.lua'
@@ -204,13 +222,22 @@ app.innerHTML = `
       <option value="tw">Taiwan (TW)</option>
       <option value="cn">China (CN)</option>
     </select>
-    <p class="hint">The game reports its own region with each scan, so this is only a fallback for a scan that does not say: pick where you play. Forever has US, EU and CN markets from launch; the beta runs on US servers for everyone, so beta scans always go to the US markets.</p>
+    <p class="hint">The game reports its own region with each scan, so this is only a fallback for a scan that does not say: pick where you play. Forever has US, EU, CN and KR markets; scans from the Taiwanese realms go to the KR markets.</p>
     <label class="check"><input id="auto" type="checkbox" /> Upload automatically when the file changes</label>
     <div class="actions">
       <button id="save" class="primary" type="button">Save and start</button>
       <button id="uploadNow" type="button">Upload now</button>
       <button id="testKey" type="button" title="Sends a signed test request; nothing is uploaded">Test key</button>
     </div>
+  </section>
+
+  <section>
+    <h2>Running in the background</h2>
+    <p class="hint">Both are off unless you turn them on.</p>
+    <label class="check"><input id="runInBackground" type="checkbox" /> Keep running in the notification area when I close or minimize the window</label>
+    <label class="check" id="startWithWindowsRow"><input id="startWithWindows" type="checkbox" /> Start AHledger sync when I sign in to Windows</label>
+    <p class="hint" id="backgroundHint"></p>
+    <p class="hint err" id="backgroundNotice" hidden></p>
   </section>
 
   <section>
@@ -236,6 +263,17 @@ const pathInput = el<HTMLInputElement>('path');
 const gameSelect = el<HTMLSelectElement>('game');
 const regionSelect = el<HTMLSelectElement>('region');
 const autoInput = el<HTMLInputElement>('auto');
+const runInBackgroundInput = el<HTMLInputElement>('runInBackground');
+const startWithWindowsInput = el<HTMLInputElement>('startWithWindows');
+/** The startup option exists on Windows only; on a Mac the row is not shown. */
+const IS_WINDOWS = navigator.userAgent.includes('Windows');
+if (!IS_WINDOWS) el<HTMLLabelElement>('startWithWindowsRow').hidden = true;
+el<HTMLParagraphElement>('backgroundHint').textContent = IS_WINDOWS
+  ? 'With the first box ticked, AHledger sync keeps uploading from an icon next to the clock ' +
+    '(Windows 11 may tuck it under the ^ arrow). Click the icon to open the window, or right-click ' +
+    'it to quit. With both ticked, a start at sign-in stays there; with only the second, it opens minimized.'
+  : 'With the box ticked, AHledger sync keeps uploading from an icon in the menu bar. Click the ' +
+    'icon to open the window, or Control-click it to quit.';
 const statusEl = el<HTMLDivElement>('status');
 const logEl = el<HTMLUListElement>('log');
 const tableStatusEl = el<HTMLDivElement>('tableStatus');
@@ -248,6 +286,8 @@ let settings: Settings = {
   game: 'forever',
   region: 'us',
   autoUpload: true,
+  runInBackground: false,
+  startWithWindows: false,
 };
 let busy = false;
 keyIdInput.addEventListener('input', () => {
@@ -284,7 +324,11 @@ function setProblem(html: string): void {
   setStatus(statusEl.innerHTML.replace(/^<div class="problem">[\s\S]*?<\/div>/, ''));
 }
 
+/** Whether the window was already brought back for the current key refusal. */
+let keyRefusalShown = false;
+
 function clearProblem(): void {
+  keyRefusalShown = false;
   if (problem === null) return;
   problem = null;
   setStatus(statusEl.innerHTML.replace(/^<div class="problem">[\s\S]*?<\/div>/, ''));
@@ -354,7 +398,72 @@ function fillForm(s: Settings): void {
   gameSelect.value = s.game;
   regionSelect.value = s.region;
   autoInput.checked = s.autoUpload;
+  runInBackgroundInput.checked = s.runInBackground;
+  startWithWindowsInput.checked = s.startWithWindows;
 }
+
+const STARTUP_REMOVED_MESSAGE =
+  'Start with Windows was turned off because its startup entry is gone. Updating or reinstalling ' +
+  'AHledger sync removes it, and so can a cleanup tool. Tick the box again to start with Windows.';
+const STARTUP_DISABLED_MESSAGE =
+  'Windows has AHledger sync turned off as a startup app, so it will not start at sign-in. Turn it ' +
+  'on in Task Manager under Startup apps, or in Settings > Apps > Startup.';
+
+/** The red line under the background boxes: why startup is off, or why it will not happen. */
+function showStartupNotice(s: Settings): void {
+  const notice = el<HTMLParagraphElement>('backgroundNotice');
+  const message = s.startupEntryRemoved
+    ? STARTUP_REMOVED_MESSAGE
+    : s.startupDisabledByWindows
+      ? STARTUP_DISABLED_MESSAGE
+      : null;
+  if (s.startupEntryRemoved) log(STARTUP_REMOVED_MESSAGE, 'err');
+  notice.textContent = message ?? '';
+  notice.hidden = message === null;
+}
+
+/**
+ * Applies and saves the box that changed, and only that one: the startup entry is never written
+ * because the other box was clicked. On a failure the boxes go back to what is actually in
+ * force, and the log says why.
+ */
+async function saveBackgroundOptions(changed: 'background' | 'startup'): Promise<void> {
+  const wanted =
+    changed === 'background'
+      ? { runInBackground: runInBackgroundInput.checked }
+      : { startWithWindows: IS_WINDOWS && startWithWindowsInput.checked };
+  try {
+    const saved = await invoke<Settings>('set_background_options', wanted);
+    settings = {
+      ...settings,
+      runInBackground: saved.runInBackground,
+      startWithWindows: saved.startWithWindows,
+    };
+    showStartupNotice(saved);
+    log(
+      `background: ${saved.runInBackground ? 'keeps running in the notification area' : 'closes normally'}` +
+        (IS_WINDOWS
+          ? `; ${saved.startWithWindows ? 'starts' : 'does not start'} at Windows sign-in`
+          : ''),
+    );
+  } catch (err) {
+    log(`could not change the background options: ${String(err)}`, 'err');
+    try {
+      const actual = await invoke<Settings>('get_settings');
+      settings = {
+        ...settings,
+        runInBackground: actual.runInBackground,
+        startWithWindows: actual.startWithWindows,
+      };
+    } catch {
+      // Keep the last known values.
+    }
+  }
+  runInBackgroundInput.checked = settings.runInBackground;
+  startWithWindowsInput.checked = settings.startWithWindows;
+}
+runInBackgroundInput.addEventListener('change', () => void saveBackgroundOptions('background'));
+startWithWindowsInput.addEventListener('change', () => void saveBackgroundOptions('startup'));
 
 const KEY_ID = /^ahl_[a-z0-9]{16}$/;
 
@@ -498,6 +607,12 @@ async function uploadPending(reason: string): Promise<void> {
         setProblem(
           `Upload refused: ${escapeHtml(describeRefusal(res))} Press Test key after fixing it.`,
         );
+        // Every upload stops until the player fixes the key: a window hidden in the
+        // notification area comes back to say so, once until uploads work again.
+        if (!keyRefusalShown) {
+          keyRefusalShown = true;
+          showWindow();
+        }
         break;
       } else {
         log(
@@ -1099,7 +1214,14 @@ async function startWatching(): Promise<void> {
   if (!settings.savedVariablesPath) return;
   // Moving starts watching the new file itself.
   if (await moveOffBetaFolder()) return;
-  await invoke('watch_file', { path: settings.savedVariablesPath });
+  try {
+    await invoke('watch_file', { path: settings.savedVariablesPath });
+  } catch (err) {
+    // Nothing is being watched: a window hidden at start must come back to say so. An upload
+    // that fails below (no network yet at sign-in is common) does not: it is retried.
+    showWindow();
+    throw err;
+  }
   log(`watching ${settings.savedVariablesPath}`);
   await uploadPending('startup');
   void refreshTables('startup');
@@ -1356,15 +1478,28 @@ async function checkForUpdate(): Promise<void> {
   }
 }
 
+/**
+ * A start hidden in the notification area must not hide a setup problem: the window comes back.
+ * A no-op when the window is already in view.
+ */
+function showWindow(): void {
+  invoke('show_window').catch(() => undefined);
+}
+
 (async () => {
   try {
     settings = await invoke<Settings>('get_settings');
     fillForm(settings);
+    showStartupNotice(settings);
     const problem = settingsProblem(settings);
     if (!problem) await startWatching();
-    else setStatus(`<span class="err">${escapeHtml(problem)}</span>`);
+    else {
+      setStatus(`<span class="err">${escapeHtml(problem)}</span>`);
+      showWindow();
+    }
   } catch (err) {
     setStatus(`<span class="err">${escapeHtml(String(err))}</span>`);
+    showWindow();
   }
   void checkForUpdate();
   setInterval(() => void checkForUpdate(), UPDATE_CHECK_MS);

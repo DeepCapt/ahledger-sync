@@ -338,11 +338,14 @@ function NS.ObserveMerchant()
   for i = 1, n do
     local id = itemIdFromLink(GetMerchantItemLink and GetMerchantItemLink(i))
     if id then
-      local price, quantity, _, extendedCost = NS.MerchantItem(i)
+      local price, quantity, available, extendedCost = NS.MerchantItem(i)
       local r = record("vendor", npcId, name, id)
       r.c = math.max(r.c, 1)
+      -- Limited stock (0.14.1): a quantity of 1 on a vendor line, so the vendor price table
+      -- the release ships leaves the item out. numAvailable is -1 for unlimited stock.
+      if tonumber(available) and tonumber(available) >= 0 then r.q = math.max(tonumber(r.q) or 0, 1) end
       if not extendedCost and price and price > 0 then
-        r.p = math.floor(price / math.max(1, tonumber(quantity) or 1))
+        r.p = math.ceil(price / math.max(1, tonumber(quantity) or 1)) -- per unit, rounded up as Vendor.lua does
       end
       items = items + 1
     end

@@ -119,6 +119,11 @@ export const FOREVER_BETA_REALM = /^classic beta\b/i;
  * a beta scan, and belongs to the US market. From the region's launch instant, its realms keep
  * their region. `observedAt` is the scan's own time in milliseconds, so a scan taken before
  * launch and uploaded after it is still placed where it was taken.
+ *
+ * Forever's Taiwanese realms ("CAMWOW TW4 Realm 2 PvP") are served from the Korean region and
+ * their clients report KR, so the KR markets hold them. A scan that says TW (a client reporting
+ * region 4, or the sync app's fallback set to Taiwan) goes to the same KR markets: Forever has
+ * no separate TW houses.
  */
 export function marketRegionFor(
   gameSlug: string,
@@ -129,6 +134,7 @@ export function marketRegionFor(
   if (gameSlug !== 'forever') return region;
   if (FOREVER_BETA_REALM.test(realmName.trim())) return 'us';
   if (observedAt < launchAtFor(region)) return 'us';
+  if (region === 'tw') return 'kr';
   return region;
 }
 
@@ -327,7 +333,7 @@ export const BLIZZARD_CLASSIC_AH_ID: Record<Faction, number> = {
  * Which markets have no prices yet and why, as one sentence: "RP Alliance US and RP Horde US are
  * not open in the beta yet, the eight EU markets open with the game at midnight CET on 5 November,
  * and the eight CN markets open with the game at 6 am China time on 5 November." Empty when the
- * list is. Regions come in the order US, EU, CN, then anything else.
+ * list is. Regions come in the order US, EU, CN, KR, then anything else.
  */
 export function unopenedSummary(
   unopened: Array<{ label: string; slug: string }>,
@@ -336,7 +342,7 @@ export function unopenedSummary(
   const and = (xs: string[]) =>
     xs.length <= 1 ? (xs[0] ?? '') : `${xs.slice(0, -1).join(', ')} and ${xs.at(-1)}`;
   const be = (xs: unknown[]) => (xs.length === 1 ? 'is' : 'are');
-  const order = ['us', 'eu', 'cn'];
+  const order = ['us', 'eu', 'cn', 'kr'];
   const regions = [...new Set(unopened.map((m) => regionOfSlug(m.slug)))].sort((a, b) => {
     const ia = order.indexOf(a);
     const ib = order.indexOf(b);

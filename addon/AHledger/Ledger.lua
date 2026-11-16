@@ -239,18 +239,71 @@ function NS.LedgerSummary(list, since)
   return rows, t
 end
 
--- "Last 7 days: sold 40 for 12g 30s (house cut 61s), bought 12 for 3g; net +8g 69s". Pure.
+-- A signed, coloured amount: "+8g 69s" in green, "-3g" in red, a grey "0" for nothing.
+local function signed(v)
+  v = v or 0
+  if v == 0 then return UI.GREY .. "0" .. UI.R end
+  return (v > 0 and UI.UP .. "+" or UI.DOWN .. "-") .. UI.PlainGold(math.abs(v)) .. UI.R
+end
+
+-- "Last 7 days", "Last day": the box takes 1 to 60.
+local function period(days)
+  days = days or 7
+  return days == 1 and "day" or (days .. " days")
+end
+
+local function nothingText(days)
+  return "Nothing in the last " .. period(days) .. ". Posts, sales and purchases appear here as they happen and as you take the mail."
+end
+
+local function isEmpty(t)
+  return not t or ((t.sold or 0) == 0 and (t.bought or 0) == 0 and (t.posted or 0) == 0 and (t.expired or 0) == 0 and (t.cancelled or 0) == 0)
+end
+
+-- "Last 7 days: net +8g 69s · sold 40 for 12g 30s (house cut 61s), bought 12 for 3g, 5 posts".
+-- The net leads (0.14.1): the line is cut at the tab's width, and the net used to be its last
+-- word, so on a busy week the one number that mattered was the part that went missing. Pure.
 function NS.LedgerText(t, days)
-  if not t or (t.sold == 0 and t.bought == 0 and t.posted == 0) then
-    return string.format("Nothing in the last %d days. Posts, sales and purchases appear here as they happen and as you take the mail.", days or 7)
-  end
+  if isEmpty(t) then return nothingText(days) end
   local parts = {}
-  if t.sold > 0 then parts[#parts + 1] = string.format("sold %d for %s (house cut %s)", t.sold, NS.Gold(t.revenue), NS.Gold(t.cut)) end
-  if t.bought > 0 then parts[#parts + 1] = string.format("bought %d for %s", t.bought, NS.Gold(t.spent)) end
-  if t.posted > 0 then parts[#parts + 1] = string.format("%d post%s", t.posted, t.posted == 1 and "" or "s") end
-  if t.expired > 0 then parts[#parts + 1] = string.format("%d expired", t.expired) end
-  local net = t.net
-  return string.format("Last %d days: %s; net %s%s%s", days or 7, table.concat(parts, ", "), net >= 0 and UI.UP .. "+" or UI.DOWN .. "-", UI.PlainGold(math.abs(net)), UI.R)
+  if t.sold > 0 then parts[#parts + 1] = string.format("sold %s for %s (house cut %s)", UI.Comma(t.sold), NS.Gold(t.revenue), NS.Gold(t.cut)) end
+  if t.bought > 0 then parts[#parts + 1] = string.format("bought %s for %s", UI.Comma(t.bought), NS.Gold(t.spent)) end
+  if t.posted > 0 then parts[#parts + 1] = string.format("%s post%s", UI.Comma(t.posted), t.posted == 1 and "" or "s") end
+  if t.expired > 0 then parts[#parts + 1] = string.format("%s expired", UI.Comma(t.expired)) end
+  if (t.cancelled or 0) > 0 then parts[#parts + 1] = string.format("%s cancelled", UI.Comma(t.cancelled)) end
+  return string.format("Last %s: net %s %s·%s %s", period(days), signed(t.net), UI.GREY, UI.R, table.concat(parts, ", "))
+end
+
+-- The whole period, one figure a line, for the tooltip over the summary line. Pure.
+function NS.LedgerDetail(t, days)
+  local lines = { "Last " .. period(days) }
+  if isEmpty(t) then
+    lines[#lines + 1] = UI.GREY .. nothingText(days) .. UI.R
+    return lines
+  end
+  lines[#lines + 1] = "Net " .. signed(t.net) .. UI.GREY .. "  (revenue less the house cut and what you spent)" .. UI.R
+  if (t.sold or 0) > 0 then
+    lines[#lines + 1] = string.format("Sold %s for %s", UI.Comma(t.sold), NS.Gold(t.revenue))
+    lines[#lines + 1] = "House cut " .. NS.Gold(t.cut)
+  end
+  if (t.bought or 0) > 0 then lines[#lines + 1] = string.format("Bought %s for %s", UI.Comma(t.bought), NS.Gold(t.spent)) end
+  local counts = {}
+  if t.posted > 0 then counts[#counts + 1] = string.format("%s post%s", UI.Comma(t.posted), t.posted == 1 and "" or "s") end
+  if t.expired > 0 then counts[#counts + 1] = string.format("%s expired", UI.Comma(t.expired)) end
+  if (t.cancelled or 0) > 0 then counts[#counts + 1] = string.format("%s cancelled", UI.Comma(t.cancelled)) end
+  if #counts > 0 then lines[#lines + 1] = UI.GREY .. table.concat(counts, ", ") .. UI.R end
+  return lines
+end
+
+-- The Total row under the per-item table: the period's sums under the matching columns, so the
+-- net for the days entered is read off, never added up by hand. nil when there is nothing. Pure.
+function NS.LedgerTotalRow(t, items)
+  -- Posts and expiries alone move no money: a Total row of blanks would say nothing.
+  if not t or (items or 0) == 0 or ((t.sold or 0) == 0 and (t.bought or 0) == 0) then return nil end
+  return {
+    name = string.format("Total (%s item%s)", UI.Comma(items), items == 1 and "" or "s"),
+    soldQ = t.sold, revenue = t.revenue, cut = t.cut, boughtQ = t.bought, spent = t.spent, net = t.net,
+  }
 end
 
 -- ---------------------------------------------------------------------------------------------
@@ -381,6 +434,8 @@ local function refresh()
   if not tab.daysBox:HasFocus() then tab.daysBox:SetText(tostring(days)) end
   local rows, totals = NS.LedgerSummary(entries(), NS.Now() - days * 86400)
   tab.status:SetText(NS.LedgerText(totals, days))
+  tab.totals, tab.days = totals, days
+  tab.totalRow = NS.LedgerTotalRow(totals, #rows)
   tab.list:SetRows(rows)
   local under = 0
   for _, r in ipairs(tab.undercut) do if r.undercut then under = under + 1 end end
@@ -393,9 +448,33 @@ local function refresh()
 end
 tab.refresh = refresh
 
+-- The period's breakdown, as tooltip lines: over the summary and over the Total row.
+local function addDetail(tt)
+  local lines = NS.LedgerDetail(tab.totals, tab.days)
+  tt:SetText(lines[1], 1, 1, 1)
+  for i = 2, #lines do tt:AddLine(lines[i], 0.93, 0.93, 0.95, true) end
+end
+tab.addDetail = addDetail
+
 local function build(parent)
   tab.status = UI.Label(parent, "", "GameFontHighlightSmall", 0, -2, 560)
   tab.status:SetWordWrap(false)
+  -- Hovering the summary shows all of it, one figure a line, however much the line had to cut.
+  local hit = CreateFrame("Frame", nil, parent)
+  hit:SetPoint("TOPLEFT", 0, 0)
+  hit:SetSize(560, 18)
+  hit:EnableMouse(true)
+  hit:SetScript("OnEnter", function(self)
+    if GameTooltip:IsForbidden() then return end
+    -- Below the line, inside the window: the summary starts at the tab's left edge.
+    GameTooltip:SetOwner(self, "ANCHOR_NONE")
+    GameTooltip:SetPoint("TOPLEFT", self, "BOTTOMLEFT", 0, -2)
+    addDetail(GameTooltip)
+    GameTooltip:Show()
+  end)
+  hit:SetScript("OnLeave", function() if not GameTooltip:IsForbidden() then GameTooltip:Hide() end end)
+  tab.statusHit = hit
+  NS.LedgerStatusHit = function() return tab.statusHit end
   UI.Label(parent, "Days", "GameFontNormalSmall", 574, -4, 44)
   tab.daysBox = UI.EditBox(parent, 44, 620, 0, function(self)
     local n = tonumber((self:GetText() or ""):match("%d+"))
@@ -406,18 +485,25 @@ local function build(parent)
   tab.list = UI.List(parent, {
     x = 0, y = -24, width = 668, rows = ROWS, rowKey = "name",
     columns = {
-      { key = "name", label = "Item", width = 200 },
+      { key = "name", label = "Item", width = 175 },
       { key = "soldQ", label = "Sold", width = 50, numeric = true, justify = "RIGHT", format = function(v) return v > 0 and UI.Comma(v) or "" end },
-      { key = "revenue", label = "Revenue", width = 100, numeric = true, format = function(v) return v > 0 and NS.Gold(v) or "" end },
+      { key = "revenue", label = "Revenue", width = 90, numeric = true, format = function(v) return v > 0 and NS.Gold(v) or "" end },
       { key = "cut", label = "House cut", width = 80, numeric = true, format = function(v) return v > 0 and (UI.GREY .. NS.Gold(v) .. UI.R) or "" end },
       { key = "boughtQ", label = "Bought", width = 55, numeric = true, justify = "RIGHT", format = function(v) return v > 0 and UI.Comma(v) or "" end },
       { key = "spent", label = "Spent", width = 90, numeric = true, format = function(v) return v > 0 and NS.Gold(v) or "" end },
       { key = "net", label = "Net", width = 90, numeric = true, format = function(v)
         if not v or v == 0 then return UI.GREY .. "-" .. UI.R end
         return (v >= 0 and UI.UP or UI.DOWN) .. (v >= 0 and "+" or "-") .. UI.PlainGold(math.abs(v)) .. UI.R
+      end, totalFormat = function(v)
+        -- The total reads as the summary line does: a grey 0 for a period that broke even.
+        if not v or v == 0 then return UI.GREY .. "0" .. UI.R end
+        return (v >= 0 and UI.UP or UI.DOWN) .. (v >= 0 and "+" or "-") .. UI.PlainGold(math.abs(v)) .. UI.R
       end },
     },
     empty = "No sales or purchases recorded yet.",
+    -- The period's sums under the columns (0.14.1), however many rows the list has to scroll.
+    totals = function() return tab.totalRow end,
+    totalsEnter = addDetail,
     onClick = function(row, button)
       if button == "RightButton" and IsControlKeyDown and IsControlKeyDown() and row.id then NS.ShowItemLink(row.id, row.name) return end
       if row.name then NS.SearchAuctionHouse(row.name) end
@@ -428,7 +514,7 @@ local function build(parent)
     end,
   })
   tab.list:SetSort("net", "desc")
-  local y = -24 - (18 + ROWS * 18 + 16) - 6
+  local y = -24 - tab.list.height - 6
   tab.underTitle = UI.Label(parent, "", "GameFontHighlightSmall", 0, y, 668)
   tab.underTitle:SetWordWrap(false)
   tab.ulist = UI.List(parent, {

@@ -139,7 +139,8 @@ function NS.WatchSyncFromData()
   if #added > 0 then parts[#parts + 1] = string.format("%d added from your account", #added) end
   if #removed > 0 then parts[#parts + 1] = string.format("%d removed on the site", #removed) end
   local line = "watchlist synced with ahledger.com: " .. table.concat(parts, ", ")
-  NS.Print(line)
+  -- The sync itself runs in scanner only; the line about it does not.
+  if not (NS.IsScannerOnly and NS.IsScannerOnly()) then NS.Print(line) end
   saveWatch()
   if NS.RefreshWindow then NS.RefreshWindow() end
   if NS.RefreshBar then NS.RefreshBar() end
@@ -197,7 +198,10 @@ local function refresh()
     local e = log[i]
     if e then lines[#lines + 1] = UI.GREY .. (e.at or "") .. UI.R .. "  " .. (e.text or "") end
   end
-  local empty = NS.AlertsPaused() and string.format("Alerts are paused while prices come from the %s snapshot that ships with the addon. They resume with live prices from AHledger sync (ahledger.com/download).", NS.TableDate() or "release")
+  local scannerOnly = NS.IsScannerOnly and NS.IsScannerOnly()
+  local pausedLine = "Alerts are paused while scanner only is on. /ahl scanner off turns them back on."
+  if scannerOnly and #lines > 0 then table.insert(lines, 1, UI.ACCENT .. pausedLine .. UI.R) end
+  local empty = scannerOnly and pausedLine or NS.AlertsPaused() and string.format("Alerts are paused while prices come from the %s snapshot that ships with the addon. They resume with live prices from AHledger sync (ahledger.com/download).", NS.TableDate() or "release")
     or "No alerts yet. Set a threshold on a watched item and they appear here and in chat."
   tab.logText:SetText(#lines > 0 and table.concat(lines, "\n") or (UI.GREY .. empty .. UI.R))
 end
@@ -370,7 +374,7 @@ function NS.WatchCommand(arg)
       w.appears = true
       w.appearsMax = (price and price > 0) and price or nil
       w.appearsSeen = nil
-      NS.Print(string.format("alert when %s appears on the auction house%s", name or id, w.appearsMax and (" at or below " .. NS.Gold(w.appearsMax)) or ""))
+      NS.Print(string.format("alert when %s appears on the auction house%s%s", name or id, w.appearsMax and (" at or below " .. NS.Gold(w.appearsMax)) or "", NS.AlertsPausedNote()))
     end
     saveWatch()
     if NS.RefreshWindow then NS.RefreshWindow() end
@@ -381,7 +385,7 @@ function NS.WatchCommand(arg)
     if not watched()[id] then watched()[id] = { name = name, addedAt = NS.Now() } end
     if price and price > 0 then
       watched()[id].below = price
-      NS.Print(string.format("alert when %s drops to %s or below", name or id, NS.Gold(price)))
+      NS.Print(string.format("alert when %s drops to %s or below%s", name or id, NS.Gold(price), NS.AlertsPausedNote()))
     else
       watched()[id].below = nil
       NS.Print("alert cleared for " .. (name or id))
@@ -444,6 +448,8 @@ NS.WatchAlertHits = alertHits
 function NS.ActiveAlerts()
   local market = NS.Market()
   if NS.AlertsPaused(market) then return {} end
+  -- Paused in scanner only, so the bar (if turned back on) never counts alerts that cannot fire.
+  if NS.IsScannerOnly and NS.IsScannerOnly() then return {} end
   local label = NS.MarketLabel(market)
   local out = {}
   for id, w in pairs(watched()) do
@@ -459,9 +465,18 @@ function NS.ActiveAlerts()
   return out
 end
 
+-- Added to an alert's confirmation while scanner only holds alerts back.
+function NS.AlertsPausedNote()
+  if NS.IsScannerOnly and NS.IsScannerOnly() then return " (paused while scanner only is on; /ahl scanner off)" end
+  return ""
+end
+
 function NS.CheckAlerts()
   local market = NS.Market()
   if NS.AlertsPaused(market) then return 0 end
+  -- Scanner only: AHledger says nothing of its own. The rules wait and judge the prices afresh
+  -- when the interface comes back.
+  if NS.Setting("scannerOnly") then return 0 end
   local label = NS.MarketLabel(market)
   local fired = 0
   local changed = false
