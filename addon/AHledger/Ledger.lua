@@ -145,13 +145,18 @@ end
 local taken = {} -- mail keys recorded this session, so a mail taken in two calls counts once
 
 local function recordMail(index)
-  if not NS.Setting("ledger") or not GetInboxHeaderInfo then return end
+  -- The ledger notes every auction mail; shopping lists need the purchases even with it off.
+  local ledgerOn = NS.Setting("ledger")
+  if not GetInboxHeaderInfo then return end
+  if not ledgerOn and not (NS.ListsExpectBuy and NS.HasLists and NS.HasLists()) then return end
   local ok = pcall(function()
     local _, _, _, subject, money, _, daysLeft, hasItem = GetInboxHeaderInfo(index)
     local kind = NS.MailKind and NS.MailKind(subject)
     if not kind or kind == "pending" or kind == "outbid" then return end
     local key = table.concat({ tostring(subject), tostring(money), tostring(daysLeft) }, "|")
-    if taken[key] then return end
+    -- Mail already noted this session: the ledger skips it, but a purchase that never reached
+    -- the bags (they were full) still counts for a list when it is taken again.
+    if taken[key] and kind ~= "won" then return end
     local inv = {}
     if GetInboxInvoiceInfo then
       local invoiceType, itemName, playerName, bid, buyout, deposit, consignment, _, _, _, count = GetInboxInvoiceInfo(index)
@@ -176,8 +181,12 @@ local function recordMail(index)
         e.id = e.id or post.id
       end
     end
+    -- Shopping lists count the purchase once it is in the bags (Lists.lua checks), so a take
+    -- that failed is not counted, and the same mail taken after a reload is not counted twice.
+    if e.k == "buy" and e.id and NS.ListsExpectBuy then NS.ListsExpectBuy(key, e.id, e.q) end
+    if taken[key] then return end
     taken[key] = true
-    NS.LedgerAdd(e)
+    if ledgerOn then NS.LedgerAdd(e) end
   end)
   local _ = ok
 end

@@ -17,7 +17,7 @@
 ]]
 
 local ADDON_NAME, NS = ...
-NS.VERSION = "0.14.5"
+NS.VERSION = "0.15.1"
 
 local MAX_SCANS_PER_MARKET = 3 -- newest scans kept per realm+faction (about 1 MB each at 50k listings)
 local MAX_SCANS_TOTAL = 12 -- hard ceiling on the SavedVariables file across every realm and faction
@@ -256,6 +256,11 @@ local DEFAULTS = {
   -- The interface switches the player already had off when scanner only went on, dot-separated:
   -- the ones to leave off when it goes off again. A setting, so the CVar backup keeps it.
   scannerKeptOff = "",
+  -- 0.15.0: bags and bank on every character for the Bags tab and the net worth page on
+  -- ahledger.com, and shopping lists from the site.
+  inventorySync = true,
+  listsPanel = true,
+  tooltipLists = true,
 }
 -- Settings written while something is dragged: not worth a "last change" note each frame.
 local SILENT = { minimapAngle = true, barX = true, barY = true }
@@ -367,11 +372,132 @@ function NS.LaunchAt(region)
   return NS.LAUNCH_AT
 end
 
+-- Client build 1.60.1.71037 (20 November 2026) stopped telling addons the realm: GetRealmName
+-- and GetNormalizedRealmName answer "" there, and the realm id is 0. A scan saved with no realm
+-- cannot be placed on a market, and the ruleset (which megaserver's auction house this is) used
+-- to be read from the realm name. What the client still gives is the server number inside the
+-- character's GUID ("Player-6928-00A1AEB0"). So (0.15.1): a realm name the client does give is
+-- remembered under that number; when it gives none, the name is taken from that memory, or from
+-- what this character's saved records said before the update; and when nothing names it, the
+-- player says once which kind of realm the character is on (/ahl realm), kept per server number.
+local rulesetFromRealm
+local function nonEmpty(v)
+  if type(v) ~= "string" then return nil end
+  v = v:gsub("^%s+", ""):gsub("%s+$", "")
+  if v == "" then return nil end
+  return v
+end
+
+-- The server number in the player's GUID, or nil before the client knows the character.
+function NS.ServerId()
+  local guid = UnitGUID and UnitGUID("player") or nil
+  local id = type(guid) == "string" and guid:match("^Player%-(%d+)%-") or nil
+  id = tonumber(id)
+  if id and id > 0 then return id end
+  return nil
+end
+
+-- AHledgerDB.realms: `server` is server number -> realm name (given by the client, or named by
+-- a character's records), `ruleset` is server number -> the ruleset the player chose with
+-- /ahl realm, `conflict` marks a number the client named two realms for (its name is then not
+-- trusted), `forgot` a number whose records the player told the addon to disregard, `told` a
+-- number whose remembered name the player has been shown once.
+local function realmMemory()
+  local db = AHledgerDB
+  if type(db) ~= "table" then return nil end
+  if type(db.realms) ~= "table" then db.realms = {} end
+  local m = db.realms
+  for _, k in ipairs({ "server", "ruleset", "conflict", "forgot", "told" }) do
+    if type(m[k]) ~= "table" then m[k] = {} end
+  end
+  return m
+end
+
+-- The one realm this character's saved records name, or nil when they name none or disagree
+-- (the same name on two realms). The records are the bags and bank counts (0.15.0), keyed
+-- "Name-Realm" with the realm and faction, and the server number since 0.15.1; a record of the
+-- other faction or of another server number is someone else. Without the faction nothing is
+-- taken: a namesake on the other side would pass for this character. Noted vendor prices are
+-- keyed by name and realm too, but carry no faction, so they are not evidence.
+local function realmFromRecords(name, faction, server)
+  local db = AHledgerDB
+  if type(db) ~= "table" or not name or type(faction) ~= "string" then return nil end
+  faction = faction:lower()
+  if faction ~= "alliance" and faction ~= "horde" then return nil end
+  local found
+  if type(db.inventory) == "table" then
+    for _, r in pairs(db.inventory) do
+      if type(r) == "table" and r.n == name and r.f == faction and (r.s == nil or server == nil or r.s == server) then
+        local realm = nonEmpty(r.r)
+        if realm then
+          if found and found ~= realm then return nil end
+          found = realm
+        end
+      end
+    end
+  end
+  return found
+end
+NS.RealmFromRecords = realmFromRecords
+
+-- A value the client may hand over as a "secret" in combat is not compared or matched.
+local function plainValue(v)
+  if NS.ObserveClear then return NS.ObserveClear(v) end
+  return v
+end
+
+-- The realm name: the client's own when it gives one, else the remembered one, else "".
+-- The second value says where it came from: "client", "server" (this server number was seen
+-- with that name), "records" (this character's saved records), or nil; the third is the server
+-- number. A character cannot change inside one session, so once the client knows who it is and
+-- the saved data has loaded the answer is kept, and the client is not asked again.
+local realmCache
+local function resolveRealm()
+  if realmCache then return realmCache.realm, realmCache.source, realmCache.server end
+  -- Only the name as shown: the normalized one has no spaces, and the ruleset words are read
+  -- as words ("RPPvP" would read as PvP).
+  local given = nonEmpty(plainValue(GetRealmName and GetRealmName() or nil))
+  local server = NS.ServerId()
+  local name = nonEmpty(plainValue(UnitName and UnitName("player") or nil))
+  -- Until the client knows the character it answers "Unknown" and no faction; nothing is
+  -- looked up, remembered or kept on that.
+  if name == UNKNOWNOBJECT then name = nil end
+  local faction = UnitFactionGroup and UnitFactionGroup("player") or nil
+  if faction ~= "Alliance" and faction ~= "Horde" then faction = nil end
+  local memory = realmMemory()
+  local realm, source = given, given and "client" or nil
+  if memory and server then
+    if given then
+      -- Two names for one number mean the number is not one realm: stop trusting it.
+      local had = nonEmpty(memory.server[server])
+      if had and had ~= given then memory.conflict[server] = true end
+      memory.server[server] = given
+    elseif not memory.conflict[server] and nonEmpty(memory.server[server]) then
+      realm, source = nonEmpty(memory.server[server]), "server"
+    end
+  end
+  if not realm and memory and name and faction and not (server and memory.forgot[server]) then
+    realm = realmFromRecords(name, faction, server)
+    source = realm and "records" or nil
+    if realm and server and not memory.conflict[server] then memory.server[server] = realm end
+  end
+  -- What the player said outranks a remembered name that says otherwise.
+  if realm and source ~= "client" and memory and server then
+    local chosen = memory.ruleset[server]
+    if chosen and rulesetFromRealm(realm) ~= chosen then realm, source = nil, nil end
+  end
+  if server and name and faction and memory then
+    realmCache = { realm = realm or "", source = source, server = server }
+  end
+  return realm or "", source, server
+end
+function NS.ResetRealmCache() realmCache = nil end
+
 function NS.ClientInfo()
   local version, build = GetBuildInfo()
   local region = detectRegion()
   local faction = UnitFactionGroup("player") or "unknown"
-  local realm = GetRealmName() or "unknown"
+  local realm, realmSource, server = resolveRealm()
   -- Before launch, Forever ran one set of test realms, hosted in the US, and every region's
   -- players were routed to them, but a European account still reported Europe. Scans and prices
   -- for such a realm belong to the US market; up to 0.8.5 they were tagged EU, refused by the
@@ -392,6 +518,8 @@ function NS.ClientInfo()
     region = region,
     faction = faction,
     realm = realm,
+    realmSource = realmSource,
+    server = server,
   }
 end
 local clientInfo = NS.ClientInfo
@@ -402,7 +530,7 @@ local clientInfo = NS.ClientInfo
 -- (Portuguese) for PvP, JdR (French), GdR (Italian) and Rol (Spanish) for RP. The site reads
 -- realm names the same way.
 local function word(r, w) return r:find("%f[%a]" .. w .. "%f[%A]") ~= nil end
-local function rulesetFromRealm(realm)
+rulesetFromRealm = function(realm)
   local r = (realm or ""):lower()
   if r:find("hardcore", 1, true) then return "hardcore" end
   local pvp = r:find("pvp", 1, true) or word(r, "jcj") or word(r, "jxj")
@@ -414,27 +542,142 @@ local function rulesetFromRealm(realm)
 end
 NS.RulesetFromRealm = rulesetFromRealm
 
+local RULESETS = { normal = true, pvp = true, rp = true, rppvp = true, hardcore = true }
+
+-- The ruleset in a market key ("forever/pvp/horde/us" -> "pvp"), or nil.
+local function rulesetOfMarket(market)
+  local r = type(market) == "string" and market:match("^[^/]+/([^/]+)/[^/]+/[^/]+$") or nil
+  if r and RULESETS[r] then return r end
+  return nil
+end
+NS.RulesetOfMarket = rulesetOfMarket
+
+-- The ruleset this character plays on, and how it is known: "realm" (the realm name says) or
+-- "chosen" (no realm name, and the player said with /ahl realm), or nil when nothing says.
+-- Never a guess: a caller that needs some market falls back itself and can say it is unsure.
+-- The pinned market is not asked: it is one setting for every character on the account, and
+-- an alt on another kind of realm would have its scans filed on the pinned one.
+function NS.ClientRuleset()
+  local info = clientInfo()
+  if info.realm ~= "" then return rulesetFromRealm(info.realm), "realm" end
+  local memory = realmMemory()
+  local chosen = memory and info.server and memory.ruleset[info.server] or nil
+  if chosen and RULESETS[chosen] then return chosen, "chosen" end
+  return nil, nil
+end
+
+-- Marks the scans saved on this server number with no realm name: with the ruleset the player
+-- gave, or with none when the answer is withdrawn. Every one of them, whatever it was marked
+-- before, so an answer put right also puts right the scans taken under the wrong one (the saved
+-- file only reaches sync on a reload). A scan from before 0.15.1 has no server number and is
+-- left alone: nothing says which character took it.
+local function markScans(server, ruleset)
+  local db = AHledgerDB
+  local marked = 0
+  if type(db) ~= "table" or type(db.scans) ~= "table" then return 0 end
+  for _, sc in pairs(db.scans) do
+    if type(sc) == "table" and sc.realm == "" and sc.server == server and sc.ruleset ~= ruleset then
+      sc.ruleset = ruleset
+      marked = marked + 1
+    end
+  end
+  return marked
+end
+
+-- The player says which kind of realm this character is on (/ahl realm pvp). Kept under the
+-- server number, so every character there has it. Returns ok, and the scans marked.
+function NS.SetRealmRuleset(ruleset)
+  if not RULESETS[ruleset] then return false, 0 end
+  local memory = realmMemory()
+  local server = NS.ServerId()
+  if not memory or not server then return false, 0 end
+  memory.ruleset[server] = ruleset
+  NS.ResetRealmCache()
+  return true, markScans(server, ruleset)
+end
+
+-- Drops what the addon remembers about this server number: the realm name, the choice, and its
+-- trust in this character's older records. For a memory that turned out wrong. Scans marked by
+-- the choice lose the mark, and wait for a new answer.
+function NS.ForgetRealm()
+  local memory = realmMemory()
+  local server = NS.ServerId()
+  if not memory or not server then return false end
+  memory.server[server] = nil
+  memory.ruleset[server] = nil
+  memory.conflict[server] = nil
+  memory.told[server] = nil
+  memory.forgot[server] = true
+  NS.ResetRealmCache()
+  markScans(server, nil)
+  return true
+end
+
+-- Once per server number: the line that says a realm name is a remembered one, and how to undo
+-- it. A name taken from older records is the one thing here the player did not say and the game
+-- did not say, so the player is shown it.
+function NS.RememberedRealmText()
+  local info = clientInfo()
+  local memory = realmMemory()
+  if info.realm == "" or info.realmSource == "client" or not info.realmSource or not memory or not info.server then return nil end
+  if memory.told[info.server] then return nil end
+  memory.told[info.server] = true
+  return string.format("the game no longer tells addons your realm. AHledger takes this character to be on %s, from what it saved before. If that is wrong, type /ahl realm forget", info.realm)
+end
+
 -- The market key this character's prices belong to: game/ruleset/faction/region, matching the
 -- site's market slugs. The options panel can override it.
 function NS.Market()
   local override = NS.Setting("market")
   if type(override) == "string" and override ~= "" then return override end
-  return NS.ClientMarket()
+  return (NS.ClientMarket())
 end
 
 -- The market of the realm and faction the client is on, whatever the options pin: the one a scan
--- taken here belongs to.
+-- taken here belongs to. With no realm name and no answer from the player the ruleset is unknown and
+-- this answers the Normal market, as it always has for a name with no ruleset word; the second
+-- value is false then, so the caller can say so.
 function NS.ClientMarket()
   local info = clientInfo()
   local region = info.region ~= "unknown" and info.region or "us"
+  local ruleset = NS.ClientRuleset()
   -- Each region is its own economy (Forever opens its EU servers with the US ones), so an EU
   -- character prices on the EU market even before it has prices; showing US prices instead would
   -- be wrong numbers presented as right. Pre-launch realms are US realms (ClientInfo).
-  return string.format("forever/%s/%s/%s", rulesetFromRealm(info.realm), (info.faction or "unknown"):lower(), region)
+  return string.format("forever/%s/%s/%s", ruleset or "normal", (info.faction or "unknown"):lower(), region), ruleset ~= nil
+end
+
+-- What to tell a player whose market cannot be told, or nil when it can (or when the client
+-- does not know the character yet). No ruleset is offered as the default: a line copied as
+-- printed must not be a wrong answer.
+function NS.MarketUnknownText()
+  if NS.ClientRuleset() then return nil end
+  if not NS.ServerId() then return nil end
+  return "the game no longer tells addons your realm, so AHledger cannot tell which auction house this character uses. Tell it once by typing the one that fits your realm: /ahl realm normal (a PvE realm), /ahl realm pvp, /ahl realm rp, /ahl realm rppvp or /ahl realm hardcore. Until then scans are kept but not sent, and prices are the Normal realm's unless you pinned a market"
+end
+
+-- The realm for a chat line: its name, or what stands in for one when the client gives none.
+function NS.RealmText(info, ruleset)
+  info = info or clientInfo()
+  if info.realm ~= "" then return info.realm end
+  ruleset = ruleset or (NS.ClientRuleset())
+  if ruleset then return "the " .. (NS.RULESET_LABEL[ruleset] or ruleset) .. " auction house" end
+  return "a realm the game did not name"
+end
+
+-- True when a stored scan was taken where this character is: the same realm and faction, or,
+-- with no realm name, the same server number and faction. Two realms with no name are not
+-- the same place, so a scan with neither a name nor a number matches nothing.
+function NS.ScanIsHere(sc, info)
+  info = info or clientInfo()
+  if type(sc) ~= "table" or sc.faction ~= info.faction then return false end
+  if info.realm ~= "" then return sc.realm == info.realm end
+  return sc.realm == "" and sc.server ~= nil and sc.server == info.server
 end
 
 -- "forever/pvp/horde/us" -> "PvP Horde (US)", the way the site names markets.
 local RULESET_LABEL = { normal = "Normal", pvp = "PvP", rp = "RP", rppvp = "RP PvP", hardcore = "Hardcore" }
+NS.RULESET_LABEL = RULESET_LABEL
 function NS.MarketLabel(market)
   market = market or NS.Market()
   local _, ruleset, faction, region = market:match("^([^/]+)/([^/]+)/([^/]+)/([^/]+)$")
@@ -527,11 +770,15 @@ local function lastScan()
   local info = clientInfo()
   for i = #db.scans, 1, -1 do
     local s = db.scans[i]
-    if s.realm == info.realm and s.faction == info.faction then return s end
+    if NS.ScanIsHere(s, info) then return s end
   end
   -- The mirror strips punctuation and spaces from names (Persist.lua), so compare that way.
+  -- With no realm name the mirror cannot say where the scan was taken; the server number
+  -- saved beside it can.
   local function plain(v) return (tostring(v or ""):gsub("[^%w%./%-]", "")) end
-  if db.lastScanAt and plain(db.lastScanRealm) == plain(info.realm) and plain(db.lastScanFaction) == plain(info.faction) then
+  local sameRealm = plain(db.lastScanRealm) == plain(info.realm)
+  if info.realm == "" then sameRealm = sameRealm and db.lastScanServer ~= nil and db.lastScanServer == info.server end
+  if db.lastScanAt and sameRealm and plain(db.lastScanFaction) == plain(info.faction) then
     return { ts = db.lastScanAt, count = db.lastScanCount or 0, realm = info.realm, faction = info.faction, mirrored = true }
   end
   return nil
@@ -879,12 +1126,19 @@ finishScan = function()
     full = true,
     count = n,
     data = data,
+    -- The server number from the character's GUID, and the ruleset when the realm name does
+    -- not say it (0.15.1): build 71037 gives no realm name, and a scan with neither a realm
+    -- nor a ruleset cannot be placed on a market.
+    server = info.server,
   }
+  if info.realm == "" then scan.ruleset = (NS.ClientRuleset()) end
+  -- A name the game did not give this session is marked as remembered.
+  if info.realm ~= "" and info.realmSource ~= "client" then scan.realmBy = info.realmSource end
   table.insert(db.scans, scan)
   local perMarket = 0
   for i = #db.scans, 1, -1 do
     local s = db.scans[i]
-    if s.realm == scan.realm and s.faction == scan.faction then
+    if s.realm == scan.realm and s.faction == scan.faction and s.ruleset == scan.ruleset then
       perMarket = perMarket + 1
       if perMarket > MAX_SCANS_PER_MARKET then table.remove(db.scans, i) end
     end
@@ -893,6 +1147,7 @@ finishScan = function()
   db.lastScanAt = scan.ts
   db.lastScanCount = n
   db.lastScanRealm = scan.realm
+  db.lastScanServer = scan.server
   db.lastScanFaction = scan.faction
   refusedAt = nil
   endScan()
@@ -906,9 +1161,15 @@ finishScan = function()
       and " Type /reload (or press Save and upload) so sync can send it."
       or " Type /reload so AHledger sync can upload it."
   end
+  local unsendable = info.realm == "" and not scan.ruleset
+  -- A scan nothing can place is not one a reload sends, so the reload line is left off.
+  if unsendable and db.settings.contribute then tail = "" end
   print_(string.format("scan saved: %s listings on %s (%s)%s.%s%s",
-    comma(n), info.realm, info.faction, skipped > 0 and string.format(", %d without item ids skipped", skipped) or "",
+    comma(n), NS.RealmText(info, scan.ruleset), info.faction, skipped > 0 and string.format(", %d without item ids skipped", skipped) or "",
     used and " Your prices use it now." or "", tail))
+  if unsendable then
+    print_("this scan cannot be sent yet: " .. (NS.MarketUnknownText() or "type /ahl realm to say which kind of realm this is") .. ".")
+  end
   -- What the scan found, right here in chat, so the scan button pays off without opening anything.
   if db.settings.scanSummary and NS.DealSummary and NS.ScanSummaryText then
     local function say()
@@ -1206,7 +1467,7 @@ function NS.Status()
     print_(string.format("caught error in %s: %s. Send this line through ahledger.com/contact.", caught.what or "?", caught.msg))
   end
   print_(string.format("v%s%s | %s %s %s | market %s | auto-scan %s | contribute %s | %d scan(s) stored | %d source line(s) | %d quest(s)",
-    NS.VERSION, db.settings.scannerOnly and " (scanner only)" or "", info.realm, info.faction, info.region, market,
+    NS.VERSION, db.settings.scannerOnly and " (scanner only)" or "", NS.RealmText(info), info.faction, info.region, market,
     db.settings.autoScan and "on" or "off", db.settings.contribute and "on" or "off", #db.scans,
     NS.ObservationCount and NS.ObservationCount() or 0, NS.QuestCount and NS.QuestCount() or 0))
   local changed = {}
@@ -1233,7 +1494,7 @@ function NS.Status()
     local age = now() - (last.ts or 0)
     print_(string.format("last scan here: %d listings, %d min ago", last.count or 0, math.floor(age / 60)))
   else
-    print_(string.format("no scan stored on this PC for %s %s yet%s; open the auction house and /ahl scan", info.realm, info.faction, t and " (the price table above is from other players' scans)" or ""))
+    print_(string.format("no scan stored on this PC for %s %s yet%s; open the auction house and /ahl scan", NS.RealmText(info), info.faction, t and " (the price table above is from other players' scans)" or ""))
   end
   local c = NS.ContributionText and NS.ContributionText(NS.Contribution and NS.Contribution())
   if c then print_(c) end
@@ -1283,9 +1544,53 @@ SlashCmdList["AHLEDGER"] = function(msg)
       print_("usage: /ahl set <" .. table.concat(keys, "|") .. "> on|off")
     end
   elseif cmd == "market" then
-    local v = (arg or ""):lower()
+    local v = ((arg or ""):lower():gsub("^%s+", ""):gsub("%s+$", ""))
+    -- A bare ruleset word is the answer to "which kind of realm", not a market to pin; a pin
+    -- already set is left as it is.
+    if v == "pve" or (not v:find("/", 1, true) and NS.RulesetOfMarket("forever/" .. v .. "/horde/us")) then
+      SlashCmdList["AHLEDGER"]("realm " .. v)
+      return
+    end
     if v == "" or v == "detect" then NS.SetSetting("market", "") else NS.SetSetting("market", v) end
-    print_("market: " .. NS.MarketLabel(NS.Market()) .. (NS.Setting("market") == "" and " (detected)" or " (pinned)"))
+    local pinned = NS.Setting("market") ~= ""
+    local _, known = NS.ClientMarket()
+    print_("market: " .. NS.MarketLabel(NS.Market()) .. (pinned and " (pinned)" or (known and " (detected)" or " (a guess: the game gave no realm)")))
+    local unknown = NS.MarketUnknownText()
+    if unknown then print_(unknown) end
+  elseif cmd == "realm" then
+    local v = ((arg or ""):lower():gsub("%s+", ""))
+    -- Realm names say PvE; the market is called Normal.
+    if v == "pve" then v = "normal" end
+    local info = clientInfo()
+    if v == "forget" then
+      print_(NS.ForgetRealm() and "forgot what was remembered about this realm." or "the game has not named this character yet; try again in a moment.")
+    elseif v ~= "" then
+      if info.realmSource == "client" then
+        print_("the game names this realm (" .. info.realm .. "), so there is nothing to set.")
+      elseif not NS.RulesetOfMarket("forever/" .. v .. "/horde/us") then
+        print_("usage: /ahl realm normal|pvp|rp|rppvp|hardcore (normal is a PvE realm), or /ahl realm forget")
+      else
+        local ok, marked = NS.SetRealmRuleset(v)
+        if not ok then
+          print_("the game has not named this character yet; try again in a moment.")
+        else
+          print_(string.format("this character's realm is set to %s.%s%s", NS.RULESET_LABEL[v] or v,
+            NS.Setting("market") ~= "" and " Prices still follow your pinned market; /ahl market detect goes back to this realm's." or "",
+            marked > 0 and string.format(" %d saved scan(s) are marked to match: type /reload and AHledger sync 0.2.32 or newer sends them.", marked) or ""))
+        end
+      end
+    end
+    if v == "" or v == "forget" then
+      info = clientInfo()
+      local ruleset = NS.ClientRuleset()
+      if info.realm ~= "" then
+        print_(string.format("realm: %s (%s)", info.realm, info.realmSource == "client" and "named by the game" or "remembered from before the game stopped naming it; /ahl realm forget if that is wrong"))
+      elseif ruleset then
+        print_(string.format("realm: %s, as you set it with /ahl realm", NS.RULESET_LABEL[ruleset] or ruleset))
+      else
+        print_(NS.MarketUnknownText() or "realm: the game has not named this character yet.")
+      end
+    end
   elseif cmd == "auto" then
     arg = (arg or ""):lower()
     if arg == "on" then db.settings.autoScan = true
@@ -1307,12 +1612,16 @@ SlashCmdList["AHLEDGER"] = function(msg)
     if NS.LinkCommand then NS.LinkCommand(arg) end
   elseif cmd == "pace" then
     for _, line in ipairs(NS.PaceHelp and NS.PaceHelp() or {}) do print_(line) end
+  elseif cmd == "list" or cmd == "lists" then
+    if NS.ListCommand then NS.ListCommand(arg) end
+  elseif cmd == "alts" or cmd == "bank" then
+    if NS.AltsCommand then NS.AltsCommand(cmd, arg) end
   elseif cmd == "pulse" then
     if NS.MarketPulse then
       if not NS.MarketPulse(true) then print_("nothing has moved since the last price table, or there is no earlier table to compare with yet") end
     end
   else
-    print_("commands: /ahl (window) | deals | bags | craft | ledger | options | scan | upload | scanner [on|off] | status | pace | pulse | link [item] | import | watch add|remove|alert | bar [lock|unlock|reset] | set <option> on|off | market <key|detect> | auto on|off | clear")
+    print_("commands: /ahl (window) | deals | bags | bank | alts [forget <name>] | list [import|remove <name>] | craft | ledger | options | scan | upload | scanner [on|off] | status | pace | pulse | link [item] | import | watch add|remove|alert | bar [lock|unlock|reset] | set <option> on|off | market <key|detect> | auto on|off | clear")
   end
 end
 
@@ -1357,6 +1666,12 @@ AHledger:SetScript("OnEvent", function(_, event, arg1)
       local line = NS.ScannerOnlyLoginLine()
       if line then print_(line) end
     end
+    -- Build 71037 names no realm: when neither this character's saved records nor the player
+    -- say which auction house this is, say so rather than show Normal prices as fact.
+    local unknown = NS.MarketUnknownText()
+    if unknown then print_(unknown) end
+    local remembered = NS.RememberedRealmText()
+    if remembered then print_(remembered) end
     if NS.DbCreated and NS.PersistState == "restored" then
       print_("your saved options and watchlist were not loaded by the game this time; AHledger restored them from its backup.")
     end

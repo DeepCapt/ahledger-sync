@@ -101,7 +101,7 @@ local function unitSighting(unit)
     class = classOf(token, localized)
   end
   local level = UnitLevel and UnitLevel(unit) or nil
-  local ruleset = NS.RulesetFromRealm and NS.RulesetFromRealm(GetRealmName and GetRealmName() or "") or nil
+  local ruleset = NS.ClientRuleset and (NS.ClientRuleset()) or nil
   NS.NoteSighting(name, faction, class, level and level > 0 and level or nil, ruleset)
 end
 
@@ -123,7 +123,7 @@ end
 
 local function scoreboardSightings()
   if not on() or not GetNumBattlefieldScores or not GetBattlefieldScore or not due("scoreboard") then return end
-  local ruleset = NS.RulesetFromRealm and NS.RulesetFromRealm(GetRealmName and GetRealmName() or "") or nil
+  local ruleset = NS.ClientRuleset and (NS.ClientRuleset()) or nil
   for i = 1, GetNumBattlefieldScores() or 0 do
     -- name, killing blows, honorable kills, deaths, honor, faction, race, class, class token.
     local ok, name, _, _, _, _, faction, _, localized, token = pcall(GetBattlefieldScore, i)
@@ -139,7 +139,7 @@ end
 local function guildSightings()
   if not on() or not GetNumGuildMembers or not GetGuildRosterInfo or not due("guild") then return end
   local faction = UnitFactionGroup and UnitFactionGroup("player") or nil
-  local ruleset = NS.RulesetFromRealm and NS.RulesetFromRealm(GetRealmName and GetRealmName() or "") or nil
+  local ruleset = NS.ClientRuleset and (NS.ClientRuleset()) or nil
   local n = GetNumGuildMembers() or 0
   for i = 1, math.min(n, 1000) do
     local ok, name, _, _, level, localized, _, _, _, _, token = pcall(GetGuildRosterInfo, i)
@@ -150,7 +150,7 @@ end
 local function whoSightings()
   if not on() or not C_FriendList or not C_FriendList.GetNumWhoResults or not C_FriendList.GetWhoInfo or not due("who") then return end
   local faction = UnitFactionGroup and UnitFactionGroup("player") or nil
-  local ruleset = NS.RulesetFromRealm and NS.RulesetFromRealm(GetRealmName and GetRealmName() or "") or nil
+  local ruleset = NS.ClientRuleset and (NS.ClientRuleset()) or nil
   for i = 1, C_FriendList.GetNumWhoResults() or 0 do
     local ok, info = pcall(C_FriendList.GetWhoInfo, i)
     if ok and type(info) == "table" and info.fullName then

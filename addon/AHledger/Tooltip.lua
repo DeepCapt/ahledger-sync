@@ -282,6 +282,8 @@ local function addLines(tooltip, itemID, link)
       tooltip:AddLine(l[2])
     end
   end
+  local listLine = NS.Setting("tooltipLists") and NS.ListLine and NS.ListLine(itemID) or nil
+  if listLine then tooltip:AddLine("|cff66bbff" .. listLine .. "|r") end
   tooltip:Show()
 end
 
@@ -294,8 +296,8 @@ end
 
 -- With the Shift-only or the Shift-for-more option on, pressing or releasing Shift over an item
 -- redraws the tooltip so the block appears, grows or goes at once, instead of on the next hover.
--- The owner's own OnEnter rebuilds the tooltip the way the game does; the stamp is cleared so
--- the block is added again.
+-- The tooltip is set again from what it shows, and the stamp is cleared so the block is added
+-- again.
 local function onModifierChanged(_, _, key)
   if key ~= "LSHIFT" and key ~= "RSHIFT" then return end
   if not NS.Setting("tooltip") then return end
@@ -335,11 +337,15 @@ function NS.RedrawTooltip(tip, owner)
     end
     return false
   end
-  local onEnter = owner.GetScript and owner:GetScript("OnEnter")
-  if not onEnter then return false end
+  -- 0.14.6: never the owner's own OnEnter. Run from here it runs as this addon's code, and
+  -- whatever the game's frame wrote in it was then counted as ours: buying a bank tab after
+  -- Shift over the bank's buttons was blocked (PurchaseBankTab). An item tooltip is set again
+  -- from its link, which only the tooltip itself handles; anything else is left as it is.
+  if not tip.GetItem or not tip.SetHyperlink then return false end
+  local _, link = tip:GetItem()
+  if type(link) ~= "string" or not link:find("|Hitem:", 1, true) then return false end
   tip.AHledgerStamp = nil
-  tip:Hide()
-  onEnter(owner)
+  tip:SetHyperlink(link)
   return true
 end
 

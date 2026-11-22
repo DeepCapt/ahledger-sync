@@ -295,7 +295,7 @@ function NS.PvpNote(ev, extra, now)
     if extra.w == 0 or extra.w == 1 then reading.w = extra.w end
   end
   e.region = info.region
-  e.r = NS.RulesetFromRealm and NS.RulesetFromRealm(info.realm) or nil
+  e.r = NS.ClientRuleset and (NS.ClientRuleset()) or e.r
   e.f = (info.faction == "Alliance" or info.faction == "Horde") and info.faction or nil
   if UnitClass then
     local localized, token = UnitClass("player")

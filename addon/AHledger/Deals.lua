@@ -20,7 +20,7 @@ function NS.LatestLocalScan()
   local info = NS.ClientInfo()
   local best = nil
   for _, s in ipairs(db.scans or {}) do
-    if s.realm == info.realm and s.faction == info.faction and s.data then
+    if NS.ScanIsHere(s, info) and s.data then
       if not best or (s.ts or 0) > (best.ts or 0) then best = s end
     end
   end

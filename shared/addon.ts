@@ -12,7 +12,7 @@
  * SHA-256 of the raw body bytes exactly as sent (compressed or not).
  */
 import type { BlizzardClassicAuction } from './auctions';
-import { marketRegionFor, type Region } from './markets';
+import { marketRegionFor, type Region, type Ruleset } from './markets';
 
 export const UPLOAD_VERSION = 1;
 export const ADDON_UPLOAD_QUEUE = 'addon-upload';
@@ -77,8 +77,17 @@ export interface UploadScan {
   /** Game slug the uploader is playing: "forever", "classic-era". */
   game: string;
   region: Region;
-  /** Realm name as the client reports it. */
+  /**
+   * Realm name as the client reports it. Empty since client build 1.60.1.71037, which names no
+   * realm; `ruleset` must say which auction house the scan is of then.
+   */
   realm: string;
+  /** The ruleset of the house scanned, sent only when the realm name is empty. */
+  ruleset?: Ruleset;
+  /** What said that ruleset: the scan itself (addon 0.15.1) or the market pinned in the addon. */
+  rulesetSource?: 'scan' | 'pinned';
+  /** The server number from the character's GUID (addon 0.15.1), kept with the raw scan. */
+  server?: number;
   faction: UploadFaction;
   /** Server time of the scan, unix seconds. */
   observedAt: number;
@@ -101,6 +110,11 @@ export interface AddonUploadJob {
   observedAt: number;
   full: boolean;
   realm: string;
+  /** The ruleset the scan carried in place of a realm name; absent when it named one. */
+  ruleset?: Ruleset;
+  /** What said that ruleset, and the GUID server number, as the upload gave them. */
+  rulesetSource?: 'scan' | 'pinned';
+  server?: number;
   addon: string;
   build: string | null;
   /** SHA-256 of the raw request body; doubles as the scan's payload hash. */
@@ -275,7 +289,17 @@ export function isUploadAuction(v: unknown): v is UploadAuction {
 
 /** One scan as the addon stores it in `AHledgerDB.scans`. */
 export interface SavedScan {
+  /** Empty when the client named no realm (build 1.60.1.71037 on); `ruleset` is set then. */
   realm: string;
+  /**
+   * Which auction house a scan with no realm name is of, and what said so: the scan itself
+   * (addon 0.15.1 writes it once the player has answered /ahl realm), or, for a scan saved by
+   * an older addon, the market pinned in the addon options.
+   */
+  ruleset?: Ruleset;
+  rulesetSource?: 'scan' | 'pinned';
+  /** The server number from the character's GUID (addon 0.15.1). */
+  server?: number;
   faction: string;
   region: string;
   /** Unix seconds (GetServerTime). */
@@ -697,22 +721,82 @@ export function pvpPointsFromSavedVariables(src: string): AddonPvpCharacter[] {
   return out;
 }
 
-export function scansFromSavedVariables(src: string): SavedScan[] {
+/** The rulesets a Forever scan can be of; "era" is Classic Era's and names no Forever house. */
+const SCAN_RULESETS: readonly Ruleset[] = ['normal', 'pvp', 'rp', 'rppvp', 'hardcore'];
+
+function scanRuleset(v: LuaValue | undefined): Ruleset | undefined {
+  return typeof v === 'string' && (SCAN_RULESETS as readonly string[]).includes(v)
+    ? (v as Ruleset)
+    : undefined;
+}
+
+function luaTable(v: LuaValue | undefined): Record<string, LuaValue> | undefined {
+  return v && typeof v === 'object' && !Array.isArray(v) ? v : undefined;
+}
+
+/**
+ * The ruleset of the market pinned in the addon options, for a scan of this faction and region
+ * saved by an addon older than 0.15.1. The pin is one setting for the whole account and was made
+ * to show another market's prices, so it speaks for a scan only when it is a Forever market of
+ * the scan's own faction and region; a pin on anything else says nothing about the scan.
+ */
+function pinnedRuleset(
+  db: Record<string, LuaValue>,
+  faction: string,
+  region: string,
+): Ruleset | undefined {
+  const market = str(luaTable(db['settings'])?.['market'])?.trim().toLowerCase();
+  const m = market?.match(/^forever\/([a-z]+)\/([a-z]+)\/([a-z]+)$/);
+  if (!m) return undefined;
+  const scanRegion = REGION_ALIASES[region.toLowerCase()];
+  // The Taiwanese realms share the Korean houses, and the addon pins them as "kr".
+  const marketRegion = scanRegion === 'tw' ? 'kr' : scanRegion;
+  if (m[2] !== faction.toLowerCase() || !marketRegion || m[3] !== marketRegion) return undefined;
+  return scanRuleset(m[1]);
+}
+
+/** What a saved file holds: the scans that can be placed, and how many cannot. */
+export interface SavedScans {
+  scans: SavedScan[];
+  /**
+   * Scans with no realm name and nothing that says which auction house they are of, newer than
+   * every scan of their faction and region that could be placed. They stay in the file; the player answers /ahl realm in
+   * the addon (0.15.1) and they are marked and sent. Older ones are not counted: a newer scan
+   * of the same player has gone out since, so nothing is waiting on them.
+   */
+  unplaced: number;
+}
+
+/**
+ * Extract the scans the addon saved. Unknown shapes are skipped rather than thrown. A scan
+ * with no realm name (client build 1.60.1.71037 gives none) is placed by the ruleset it carries;
+ * one saved by an addon older than 0.15.1, which wrote no ruleset and no server number, by the
+ * pinned market when that is of the scan's own faction and region. With neither it is left out.
+ * Nothing is inferred from the rest of the file: a scan does not say which character took it,
+ * and a guess files one auction house's prices on another.
+ */
+export function readSavedScans(src: string): SavedScans {
   const root = parseLuaSavedVariables(src);
   const db = root['AHledgerDB'];
-  if (!db || typeof db !== 'object' || Array.isArray(db)) return [];
+  if (!db || typeof db !== 'object' || Array.isArray(db)) return { scans: [], unplaced: 0 };
   const scans = db['scans'];
-  if (!Array.isArray(scans)) return [];
+  if (!Array.isArray(scans)) return { scans: [], unplaced: 0 };
   const out: SavedScan[] = [];
+  const unplacedAt: Array<{ ts: number; where: string }> = [];
+  const whereOf = (faction: string, region: string) =>
+    `${faction.toLowerCase()}|${region.toLowerCase()}`;
   for (const s of scans) {
     if (!s || typeof s !== 'object' || Array.isArray(s)) continue;
-    const realm = str(s['realm']);
+    const rawRealm = str(s['realm']);
+    // A name of spaces only is no name; a real one is kept exactly as the client gave it.
+    const realm = rawRealm === undefined ? undefined : rawRealm.trim() === '' ? '' : rawRealm;
     const faction = str(s['faction']);
     const region = str(s['region']);
     const data = str(s['data']);
     const ts = typeof s['ts'] === 'number' ? s['ts'] : undefined;
-    if (!realm || !faction || !region || data === undefined || ts === undefined) continue;
-    out.push({
+    if (realm === undefined || !faction || !region || data === undefined || ts === undefined)
+      continue;
+    const scan: SavedScan = {
       realm,
       faction,
       region,
@@ -722,9 +806,46 @@ export function scansFromSavedVariables(src: string): SavedScan[] {
       addon: str(s['addon']),
       full: typeof s['full'] === 'boolean' ? s['full'] : undefined,
       count: typeof s['count'] === 'number' ? s['count'] : undefined,
-    });
+    };
+    const server = s['server'];
+    if (typeof server === 'number' && Number.isInteger(server) && server > 0) scan.server = server;
+    if (!realm) {
+      const own = scanRuleset(s['ruleset']);
+      // A scan with a server number is from addon 0.15.1, which asks the player; the pin is
+      // not put in place of an answer the player has not given.
+      const pinned =
+        own || scan.server !== undefined ? undefined : pinnedRuleset(db, faction, region);
+      const ruleset = own ?? pinned;
+      if (!ruleset) {
+        unplacedAt.push({ ts, where: whereOf(faction, region) });
+        continue;
+      }
+      scan.ruleset = ruleset;
+      scan.rulesetSource = own ? 'scan' : 'pinned';
+    }
+    out.push(scan);
   }
-  return out;
+  // Per faction and region: a newer Alliance scan sent says nothing about a Horde one waiting.
+  const newestPlaced = new Map<string, number>();
+  for (const s of out) {
+    const where = whereOf(s.faction, s.region);
+    newestPlaced.set(where, Math.max(newestPlaced.get(where) ?? 0, s.ts));
+  }
+  return {
+    scans: out,
+    unplaced: unplacedAt.filter((u) => u.ts > (newestPlaced.get(u.where) ?? 0)).length,
+  };
+}
+
+/** The scans in a saved file that can be placed on a market (see readSavedScans). */
+export function scansFromSavedVariables(src: string): SavedScan[] {
+  return readSavedScans(src).scans;
+}
+
+/** How a log line names where a scan is from: its realm, or its house when it has no name. */
+export function scanPlaceLabel(scan: { realm: string; ruleset?: Ruleset }): string {
+  if (scan.realm) return scan.realm;
+  return scan.ruleset ? `${scan.ruleset} auction house (no realm name)` : 'unnamed realm';
 }
 
 const REGION_ALIASES: Record<string, Region> = { us: 'us', eu: 'eu', kr: 'kr', tw: 'tw', cn: 'cn' };
@@ -750,6 +871,12 @@ export function savedScanToUpload(
     game,
     region,
     realm: scan.realm,
+    // Only a scan with no realm name says its ruleset: a name says it better, and a server
+    // from before this field refuses nothing it already took.
+    ...(scan.realm === '' && scan.ruleset
+      ? { ruleset: scan.ruleset, rulesetSource: scan.rulesetSource ?? 'scan' }
+      : {}),
+    ...(scan.server !== undefined ? { server: scan.server } : {}),
     faction,
     observedAt: Math.floor(scan.ts),
     full: scan.full ?? true,

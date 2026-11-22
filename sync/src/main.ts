@@ -13,7 +13,9 @@ import {
   OBSERVATIONS_VERSION,
   REGIONS,
   betaFolderMove,
+  inventoryUploadBody,
   isBetaClientPath,
+  listsSyncBody,
   launchAtFor,
   ledgerFromSavedVariables,
   localeFromSavedVariables,
@@ -27,7 +29,9 @@ import {
   questsFromSavedVariables,
   parseLuaSavedVariables,
   refusalAdvice,
+  readSavedScans,
   savedScanToUpload,
+  scanPlaceLabel,
   scansFromSavedVariables,
   type Region,
   type SavedScan,
@@ -140,13 +144,15 @@ interface RefreshResult {
   } | null;
   /** The account watchlist written for the addon, when the server answered. */
   watch: { linked: boolean; at: number; savedAt: number; items: number } | null;
+  /** The account's shopping lists written for the addon (0.2.30), when the server answered. */
+  lists?: { linked: boolean; lists: number; items: number } | null;
   /** Characters in the PvP table written for the tooltip (0.2.27), when the server had one. */
   pvp?: number | null;
   /** Why the PvP table was not refreshed, when it was not. */
   pvpError?: string | null;
 }
 
-const VERSION = '0.2.29';
+const VERSION = '0.2.32';
 /** Where the saved-variables file sits, written the way this system writes paths. */
 const PATH_EXAMPLE = /Macintosh|Mac OS X/.test(navigator.userAgent)
   ? '/Applications/World of Warcraft/…/WTF/Account/ACCOUNT/SavedVariables/AHledger.lua'
@@ -369,6 +375,8 @@ function saveUploaded(set: Set<string>): void {
 }
 
 const scanKey = (s: SavedScan) => `${s.region}|${s.realm}|${s.faction}|${s.ts}`;
+/** The last "cannot be sent yet" line logged, so it is said once and not on every check. */
+let lastUnplaced: string | null = null;
 
 function readForm(): SettingsInput {
   return {
@@ -510,13 +518,15 @@ async function uploadPending(reason: string): Promise<void> {
     // The ledger is the player's own record for their account page, not a contribution, so it
     // goes up whether or not scans do.
     await uploadLedger(text);
+    // So are the bags and bank for the net worth page, unless the addon switch is off.
+    await uploadInventory(text);
     if (!contributionOn(text)) {
       setStatus(
         `Watching <b>${escapeHtml(settings.savedVariablesPath)}</b><br/>Contribution is off in the addon settings (/ahl), so scans stay on this machine.`,
       );
       return;
     }
-    const scans = scansFromSavedVariables(text);
+    const { scans, unplaced } = readSavedScans(text);
     // Which game this file really comes from: its folder, or the build its newest scan recorded.
     // Sent under the other game, scans and item sources would land on the wrong game's markets
     // and item pages, so nothing is sent until the Game setting matches.
@@ -549,9 +559,21 @@ async function uploadPending(reason: string): Promise<void> {
     await uploadPvpPoints(text);
     const uploaded = loadUploaded();
     const pending = scans.filter((s) => !uploaded.has(scanKey(s)));
+    // Scans the file holds that name no realm, with nothing that says which auction house they
+    // are of (game build 1.60.1.71037 stopped naming the realm), and no newer scan sent. They
+    // are kept; addon 0.15.1 asks the player once and marks them, and the next check sends them.
+    const unplacedNote =
+      unplaced > 0
+        ? `${unplaced} scan(s) in the file cannot be sent yet. The game no longer tells addons the realm, so nothing says which auction house they are from. Update the AHledger addon to 0.15.1 or newer and log in. If it asks which kind of realm you are on, answer it with the /ahl realm line that fits, then /reload. If it does not ask, scan the auction house again and /reload.`
+        : null;
+    if (unplacedNote && lastUnplaced !== unplacedNote) log(unplacedNote, 'err');
+    lastUnplaced = unplacedNote;
+    const watching = `Watching <b>${escapeHtml(settings.savedVariablesPath)}</b>`;
     if (pending.length === 0) {
       setStatus(
-        `Watching <b>${escapeHtml(settings.savedVariablesPath)}</b><br/>${scans.length} scan(s) in file, nothing new (${reason}).`,
+        unplacedNote
+          ? `${watching}<br/><span class="err">${escapeHtml(unplacedNote)}</span>`
+          : `${watching}<br/>${scans.length} scan(s) in file, nothing new (${reason}).`,
       );
       return;
     }
@@ -565,7 +587,7 @@ async function uploadPending(reason: string): Promise<void> {
       const upload = savedScanToUpload(scan, settings.game, fallback);
       if (!upload) {
         log(
-          `skipped ${scan.realm} ${scan.faction} ${scan.region}: unsupported region or faction`,
+          `skipped ${scanPlaceLabel(scan)} ${scan.faction} ${scan.region}: unsupported region or faction`,
           'err',
         );
         uploaded.add(scanKey(scan));
@@ -580,8 +602,24 @@ async function uploadPending(reason: string): Promise<void> {
         uploaded.add(scanKey(scan));
         deferred.delete(scanKey(scan));
         log(
-          `uploaded ${upload.realm} ${upload.faction}: ${upload.auctions.length} listings from ${when}`,
+          `uploaded ${scanPlaceLabel(upload)} ${upload.faction}: ${upload.auctions.length} listings from ${when}`,
           'ok',
+        );
+      } else if (
+        res.status === 400 &&
+        upload.realm === '' &&
+        /^invalid upload: realm (?!is empty)/.test(errorText(res.body))
+      ) {
+        // A server from before scans with no realm name answers 400 to the empty name itself
+        // ("realm Too small..."); the current one words its own refusal differently. Marking
+        // the scan done would lose it for good, so it waits and is tried again.
+        deferred.set(scanKey(scan), Date.now());
+        log(
+          `not accepted yet ${scanPlaceLabel(upload)} ${upload.faction}: the server does not take scans without a realm name yet; will try again`,
+          'err',
+        );
+        setProblem(
+          `Scan of ${escapeHtml(scanPlaceLabel(upload))} ${upload.faction} from ${when} is waiting: the server does not take scans without a realm name yet. Sync will try again by itself.`,
         );
       } else if (res.status === 422) {
         // The server did not place this scan (an unknown realm, usually). That can change on
@@ -589,18 +627,18 @@ async function uploadPending(reason: string): Promise<void> {
         // or on its own after DEFER_MS, rather than on every save of the file.
         deferred.set(scanKey(scan), Date.now());
         log(
-          `not accepted yet ${upload.realm} ${upload.faction}: ${errorText(res.body)}; will try again`,
+          `not accepted yet ${scanPlaceLabel(upload)} ${upload.faction}: ${errorText(res.body)}; will try again`,
           'err',
         );
         setProblem(
-          `Scan of ${escapeHtml(upload.realm)} ${upload.faction} from ${when} not placed. ${escapeHtml(describeRefusal(res))}`,
+          `Scan of ${escapeHtml(scanPlaceLabel(upload))} ${upload.faction} from ${when} not placed. ${escapeHtml(describeRefusal(res))}`,
         );
       } else if (res.status === 400) {
         // The server will never accept this exact scan; do not resend it on every file change.
         uploaded.add(scanKey(scan));
-        log(`rejected ${upload.realm} ${upload.faction}: ${errorText(res.body)}`, 'err');
+        log(`rejected ${scanPlaceLabel(upload)} ${upload.faction}: ${errorText(res.body)}`, 'err');
         setProblem(
-          `Scan of ${escapeHtml(upload.realm)} ${upload.faction} from ${when} refused. ${escapeHtml(describeRefusal(res))}`,
+          `Scan of ${escapeHtml(scanPlaceLabel(upload))} ${upload.faction} from ${when} refused. ${escapeHtml(describeRefusal(res))}`,
         );
       } else if (res.status === 401) {
         log(`upload key rejected: ${errorText(res.body)}`, 'err');
@@ -841,6 +879,80 @@ async function uploadLedger(text: string): Promise<void> {
   }
 }
 
+/** Hash of the last bags-and-bank upload, so unchanged counts are not sent again. */
+const INVENTORY_KEY = 'ahl.inventory';
+
+/**
+ * Every character's gold, bags and bank as the addon counted them (0.15.0), for the net worth
+ * page on ahledger.com. Sent whole when it changed and the addon's inventorySync switch is on;
+ * the server keeps one row per character and one value per day, so a resend changes nothing.
+ */
+async function uploadInventory(text: string): Promise<void> {
+  // The net worth page is for WoW Forever, and a file from the other game would file its
+  // characters under the wrong one.
+  if (settings.game !== 'forever') return;
+  if (
+    savedFileGameMismatch({
+      path: settings.savedVariablesPath,
+      newestBuild: null,
+      settingGame: settings.game,
+    })
+  ) {
+    return;
+  }
+  let payload: string | null;
+  try {
+    payload = inventoryUploadBody(text, gameSlug());
+  } catch {
+    return;
+  }
+  if (!payload) return;
+  const hash = hashOf(payload);
+  let last: string | null = null;
+  try {
+    last = localStorage.getItem(INVENTORY_KEY);
+  } catch {
+    last = null;
+  }
+  if (last === hash) return;
+  try {
+    const res = await signed('upload_inventory', { body: payload });
+    if (res.status === 200) {
+      const parsed = JSON.parse(res.body) as { linked?: boolean; stored?: number };
+      if (parsed.linked === false) {
+        if (last !== 'unlinked') {
+          log('net worth: this key is not paired with an account, so bags and bank stay in game');
+        }
+        try {
+          localStorage.setItem(INVENTORY_KEY, 'unlinked');
+        } catch {
+          // nothing to remember
+        }
+        return;
+      }
+      if ((parsed.stored ?? 0) > 0) {
+        log(`net worth: ${parsed.stored} character(s) sent to your account`, 'ok');
+      }
+      try {
+        localStorage.setItem(INVENTORY_KEY, hash);
+      } catch {
+        // a lost hash only costs one extra send
+      }
+    } else if (res.status === 400) {
+      log(`bags and bank refused: ${errorText(res.body)}`, 'err');
+      try {
+        localStorage.setItem(INVENTORY_KEY, hash);
+      } catch {
+        // as above
+      }
+    } else if (res.status !== 404) {
+      log(`bags and bank not sent (HTTP ${res.status}): ${errorText(res.body)}; will retry`, 'err');
+    }
+  } catch (err) {
+    log(`bags and bank not sent: ${String(err)}`, 'err');
+  }
+}
+
 /**
  * The addon's item source table (what dropped from what, vendor stock, quest rewards), sent
  * whole whenever it changed. The server keeps counts as maxima per line, so sending the same
@@ -968,6 +1080,7 @@ function forgetMarksIfIdentityChanged(): void {
       UPLOADED_KEY,
       OBSERVATIONS_KEY,
       LEDGER_KEY,
+      INVENTORY_KEY,
       SIGHTINGS_KEY,
       PVP_POINTS_KEY,
       WATCH_SINCE_KEY,
@@ -1064,17 +1177,35 @@ async function refreshTables(reason: string): Promise<RefreshResult | null> {
     // back in the data file. A file that cannot be read sends nothing.
     forgetMarksIfIdentityChanged();
     let watch: string | null = null;
+    // Shopping lists the same way: what the addon counted as bought goes up, the lists come back.
+    let lists: string | null = null;
     // The PvP table follows the region the saved file plays on; the setting stands in.
     let region: string = settings.region;
+    // Lists are made for WoW Forever only, and never written into another game's folder.
+    const listsHere =
+      gameSlug() === 'forever' &&
+      !savedFileGameMismatch({
+        path: settings.savedVariablesPath,
+        newestBuild: null,
+        settingGame: settings.game,
+      });
     try {
       const text = await invoke<string>('read_scan_file', { path: settings.savedVariablesPath });
       const payload = watchPayloadFrom(text, watchSince());
       if (payload) watch = JSON.stringify({ ...payload, game: gameSlug() });
+      lists = listsHere ? listsSyncBody(text, 'forever') : null;
       region = playedRegion(text) ?? region;
     } catch {
       watch = null;
+      // Empty: the file could not be read this time, so sync writes the last lists again.
+      lists = listsHere ? '' : null;
     }
-    const res = await invoke<RefreshResult>('refresh_price_tables', { watch, region });
+    const res = await invoke<RefreshResult>('refresh_price_tables', { watch, lists, region });
+    if (res.lists?.linked && res.lists.lists > 0) {
+      log(
+        `shopping lists: ${res.lists.lists} list(s), ${res.lists.items} item(s) written for the addon`,
+      );
+    }
     if (res.watch?.linked) {
       try {
         // The mark is the saved file the server has now processed: a change stamped in game

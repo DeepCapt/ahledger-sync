@@ -58,7 +58,9 @@ function NS.ResetVendorTable() shipped = nil end
 -- what another pays.
 local function me()
   local name = UnitName and UnitName("player") or nil
-  local realm = GetRealmName and GetRealmName() or nil
+  local realm = NS.ClientInfo and NS.ClientInfo().realm or (GetRealmName and GetRealmName() or nil)
+  -- "" is what the client gives for a realm since build 71037; the resolved name keeps the key
+  -- this character's prices were noted under.
   return tostring(name or "?") .. "-" .. tostring(realm or "?")
 end
 NS.VendorCharacter = me

@@ -2,6 +2,10 @@
   Bag appraisal. Every item in the player's bags with its count, the market median, the total
   at median, the vendor total, and whether the auction house beats the vendor by a margin.
   Also the tooltip line "You have N, worth X at median" (option tooltipBags).
+
+  0.15.0: the tab shows one of three scopes, this character's bags, its bank as last seen, or
+  every character's bags and bank (Inventory.lua keeps the counts), and the last one carries the
+  account's net worth: gold plus items at the better of the median and the vendor price.
 ]]
 local _, NS = ...
 local UI = NS.UI
@@ -40,23 +44,32 @@ function NS.SellVerdict(median, vendor)
   return nil
 end
 
--- Rows per item id across all bags, plus totals. Pure, so the harness can drive it.
-function NS.AppraiseBags()
+-- Rows per item id, plus totals, for a scope: nil or "bags" (this character's bags, read now),
+-- "bank" (its bank as last counted) or "all" (every character's bags and bank, as counted).
+-- Pure apart from the reads, so the harness can drive it.
+function NS.AppraiseBags(scope)
   local market = NS.Market()
   local byId = {}
-  local lastBag = (NUM_BAG_SLOTS or 4)
-  if NUM_REAGENTBAG_SLOTS then lastBag = lastBag + NUM_REAGENTBAG_SLOTS end
-  for bag = 0, lastBag do
-    for slot = 1, numSlots(bag) do
-      local id, count, link = slotItem(bag, slot)
-      if id then
-        local r = byId[id]
-        if not r then
-          r = { itemID = id, count = 0, link = link }
-          byId[id] = r
+  if scope == "bank" or scope == "all" then
+    local holdings = NS.InventoryHoldings(NS.InventoryRecords(), scope, NS.InventoryKey())
+    for id, h in pairs(holdings) do
+      byId[id] = { itemID = id, count = h.count, bound = h.bound, holders = h.holders }
+    end
+  else
+    local lastBag = (NUM_BAG_SLOTS or 4)
+    if NUM_REAGENTBAG_SLOTS then lastBag = lastBag + NUM_REAGENTBAG_SLOTS end
+    for bag = 0, lastBag do
+      for slot = 1, numSlots(bag) do
+        local id, count, link = slotItem(bag, slot)
+        if id then
+          local r = byId[id]
+          if not r then
+            r = { itemID = id, count = 0, link = link }
+            byId[id] = r
+          end
+          r.count = r.count + (count or 1)
+          r.link = r.link or link
         end
-        r.count = r.count + (count or 1)
-        r.link = r.link or link
       end
     end
   end
@@ -91,27 +104,80 @@ function NS.AppraiseBags()
 end
 
 -- Tooltip line for one item: count across bags and bank, and its value at the median.
+-- Since 0.15.0 it adds what the player's other characters hold, as last counted.
 function NS.BagLine(itemID, row)
   if not GetItemCount then return nil end
   local n = GetItemCount(itemID, true) or 0
-  if n <= 0 then return nil end
+  local alts = NS.AltCountCached and NS.AltCountCached(itemID) or 0
+  if n <= 0 and alts <= 0 then return nil end
+  local more = alts > 0 and string.format(" (+%s on other characters)", UI.Comma(alts)) or ""
+  if n <= 0 then return string.format("Your other characters have %s", UI.Comma(alts)) end
   if row and row.median then
-    return string.format("You have %s, worth %s at median", UI.Comma(n), NS.Gold(n * row.median))
+    return string.format("You have %s%s, worth %s at median", UI.Comma(n), more, NS.Gold(n * row.median))
   end
-  return string.format("You have %s", UI.Comma(n))
+  return string.format("You have %s%s", UI.Comma(n), more)
+end
+
+local SCOPES = { "bags", "bank", "all" }
+local SCOPE_LABEL = { bags = "Bags", bank = "Bank", all = "All characters" }
+tab.scope = "bags"
+
+local function vendorOf(id)
+  local v = select(11, GetItemInfo(id))
+  return v
+end
+
+-- The line above the list for the bank and all-characters scopes.
+local function scopeLine(totals)
+  if tab.scope == "bank" then
+    local r = NS.InventoryRecords()[NS.InventoryKey() or ""]
+    if not r or (tonumber(r.bt) or 0) == 0 then return "Your bank has not been counted on this character yet. Visit the bank once and it is kept from then on." end
+    return string.format("Bank as counted %s: %s items, %s at median.", UI.AgoText(NS.Now() - r.bt), UI.Comma(totals.items), NS.Gold(totals.median))
+  end
+  local w = NS.NetWorth(NS.Market(), NS.Price, vendorOf)
+  return string.format("Net worth %s across %d %s: %s gold, %s in items (bound items at the vendor price).", NS.Gold(w.total), w.characters,
+    w.characters == 1 and "character" or "characters", NS.Gold(w.gold), NS.Gold(w.items))
 end
 
 local function refresh()
   if not tab.list then return end
-  local rows, totals = NS.AppraiseBags()
-  tab.totals:SetText(string.format("%s items: %s at median, %s at the vendor. \"Auction\" marks items worth at least %.1fx their vendor price.",
-    UI.Comma(totals.items), NS.Gold(totals.median), NS.Gold(totals.vendor), AH_OVER_VENDOR))
+  local rows, totals = NS.AppraiseBags(tab.scope)
+  if tab.scope == "bank" or tab.scope == "all" then
+    tab.totals:SetText(scopeLine(totals))
+  else
+    tab.totals:SetText(string.format("%s items: %s at median, %s at the vendor. \"Auction\" marks items worth at least %.1fx their vendor price.",
+      UI.Comma(totals.items), NS.Gold(totals.median), NS.Gold(totals.vendor), AH_OVER_VENDOR))
+  end
+  if tab.scopeButton then tab.scopeButton:SetText(SCOPE_LABEL[tab.scope] or "Bags") end
   tab.list:SetRows(rows)
 end
 
+-- /ahl bank, /ahl alts, /ahl alts forget <name>
+function NS.AltsCommand(cmd, arg)
+  local sub, rest = tostring(arg or ""):match("^(%S*)%s*(.-)$")
+  if cmd == "alts" and (sub or ""):lower() == "forget" then
+    local n = NS.InventoryForget(rest)
+    NS.Print(n > 0 and ("forgot " .. rest .. "; it is counted again when it logs in") or ("no character named " .. tostring(rest) .. " is counted"))
+    if n > 0 and NS.Setting("inventorySync") then NS.Print("to remove it from ahledger.com/networth as well, press Forget there") end
+    return n
+  end
+  tab.scope = cmd == "bank" and "bank" or "all"
+  if NS.OpenWindow then NS.OpenWindow("bags") end
+  refresh()
+  return nil
+end
+
 local function build(parent)
-  tab.totals = UI.Label(parent, "", "GameFontHighlightSmall", 0, -2, 668)
+  tab.totals = UI.Label(parent, "", "GameFontHighlightSmall", 0, -2, 548)
   tab.totals:SetWordWrap(false)
+  tab.scopeButton = UI.Button(parent, SCOPE_LABEL[tab.scope], 116, function(self)
+    local entries = {}
+    for _, s in ipairs(SCOPES) do
+      entries[#entries + 1] = { text = SCOPE_LABEL[s], checked = tab.scope == s, onClick = function() tab.scope = s; refresh() end }
+    end
+    UI.Menu(self, entries, 140)
+  end)
+  tab.scopeButton:SetPoint("TOPRIGHT", parent, "TOPRIGHT", 0, 2)
   tab.list = UI.List(parent, {
     x = 0, y = -24, width = 668, rows = 21, rowKey = "itemID",
     columns = {
@@ -136,7 +202,18 @@ local function build(parent)
         NS.SearchAuctionHouse(row.name)
       end
     end,
-    onEnter = function(tt) tt:AddLine(UI.GREY .. "Click to search the auction house, right-click to watch, ctrl+right-click for its ahledger.com page" .. UI.R, nil, nil, nil, true) end,
+    onEnter = function(tt, row)
+      if row and row.holders and #row.holders > 0 then
+        for i, h in ipairs(row.holders) do
+          if i > 8 then tt:AddLine(UI.GREY .. string.format("and %d more", #row.holders - 8) .. UI.R) break end
+          local parts = {}
+          if h.bags > 0 then parts[#parts + 1] = UI.Comma(h.bags) .. " in bags" end
+          if h.bank > 0 then parts[#parts + 1] = UI.Comma(h.bank) .. " in the bank" end
+          tt:AddDoubleLine(h.name, table.concat(parts, ", "), 0.9, 0.9, 0.9, 0.7, 0.7, 0.7)
+        end
+      end
+      if row and (row.bound or 0) > 0 then tt:AddLine(UI.GREY .. UI.Comma(row.bound) .. " soulbound: counted at the vendor price in net worth" .. UI.R, nil, nil, nil, true) end
+      tt:AddLine(UI.GREY .. "Click to search the auction house, right-click to watch, ctrl+right-click for its ahledger.com page" .. UI.R, nil, nil, nil, true) end,
   })
   tab.list:SetSort("total", "desc")
 end

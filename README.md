@@ -34,11 +34,6 @@ exists.
 - **Stores** its settings, including the upload key secret, in your user profile's app config
   folder (on macOS `~/Library/Application Support/com.ahledger.sync`, readable by your account
   only). The secret stays on the Rust side: the window never receives it back.
-- **Starts with Windows only if you ask it to.** Two boxes, both off by default, keep sync in
-  the notification area and start it when you sign in. The second adds one value, `AHledger
-  sync`, to your own startup list (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`), only
-  when you tick it; unticking it or uninstalling sync removes it
-  ([`sync/src-tauri/src/background.rs`](sync/src-tauri/src/background.rs)).
 - **Opens web pages** only on ahledger.com (the download page, and the Connect approval page),
   through a strict address check.
 - **Installs for the current user only** and needs no administrator rights on Windows; on macOS

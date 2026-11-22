@@ -113,6 +113,56 @@ fn err<E: std::fmt::Display>(e: E) -> String {
     e.to_string()
 }
 
+/// A request that got no answer. reqwest's own text ("error sending request for url (...)")
+/// leaves out why, which is all a player can act on, so the causes underneath are appended and
+/// then one plain line on what usually fixes it.
+fn net_err(e: reqwest::Error) -> String {
+    use std::error::Error as _;
+    let mut text = e.to_string();
+    let mut causes: Vec<String> = Vec::new();
+    let mut src = e.source();
+    while let Some(s) = src {
+        let t = s.to_string();
+        if !t.is_empty() && !text.contains(&t) && !causes.contains(&t) {
+            causes.push(t);
+        }
+        src = s.source();
+    }
+    if !causes.is_empty() {
+        text = format!("{text}: {}", causes.join(": "));
+    }
+    match net_hint(&text) {
+        Some(hint) => format!("{text}. {hint}"),
+        None => text,
+    }
+}
+
+/// What usually causes a request to fail before any answer, from the error text.
+fn net_hint(text: &str) -> Option<&'static str> {
+    let t = text.to_lowercase();
+    if t.contains("certificate") || t.contains("unknownissuer") || t.contains("invalid peer") {
+        Some("Something on this PC is replacing ahledger.com's security certificate, usually antivirus HTTPS or web scanning: add AHledger sync to its exceptions, or turn that scanning off")
+    } else if t.contains("dns")
+        || t.contains("resolve")
+        || t.contains("no such host")
+        || t.contains("11001")
+    {
+        Some("This PC could not look up ahledger.com: check the internet connection, a VPN, or the DNS settings")
+    } else if t.contains("10013")
+        || t.contains("forbidden by its access permissions")
+        || t.contains("refused")
+        || t.contains("10061")
+        || t.contains("forcibly closed")
+        || t.contains("10054")
+    {
+        Some("A firewall or antivirus is blocking AHledger sync from the network: allow AHledger sync in it")
+    } else if t.contains("timed out") || t.contains("10060") {
+        Some("The connection timed out: a firewall, VPN or proxy may be holding it")
+    } else {
+        None
+    }
+}
+
 fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = app.path().app_config_dir().map_err(err)?;
     fs::create_dir_all(&dir).map_err(err)?;
@@ -474,7 +524,7 @@ async fn signed_post(
         if gzip_body {
             req = req.header("content-encoding", "gzip");
         }
-        let res = req.body(bytes.clone()).send().await.map_err(err)?;
+        let res = req.body(bytes.clone()).send().await.map_err(net_err)?;
         let status = res.status().as_u16();
         let body = res.text().await.unwrap_or_default();
         if attempt == 1 {
@@ -570,7 +620,7 @@ async fn check_for_update() -> Result<UpdateInfo, String> {
         .get(format!("{SITE_URL}/api/sync/version"))
         .send()
         .await
-        .map_err(err)?
+        .map_err(net_err)?
         .error_for_status()
         .map_err(err)?
         .text()
@@ -743,7 +793,7 @@ async fn pair_start(state: State<'_, AppState>) -> Result<PairStarted, String> {
         .post(format!("{SITE_URL}/api/pair/start"))
         .send()
         .await
-        .map_err(err)?;
+        .map_err(net_err)?;
     let status = res.status();
     if !status.is_success() {
         return Err(site_refusal(status));
@@ -791,7 +841,11 @@ async fn pair_poll(app: AppHandle, state: State<'_, AppState>) -> Result<PairRes
     let res = match sent {
         Ok(res) => res,
         Err(e) => {
-            return Ok(pair_result("retry", None, Some(format!("could not reach ahledger.com ({e})"))));
+            return Ok(pair_result(
+                "retry",
+                None,
+                Some(format!("could not reach ahledger.com ({})", net_err(e))),
+            ));
         }
     };
     let status = res.status();
@@ -853,6 +907,13 @@ async fn upload_observations(app: AppHandle, body: String) -> Result<UploadResul
 #[tauri::command]
 async fn upload_ledger(app: AppHandle, body: String) -> Result<UploadResult, String> {
     signed_post(&app, "/v1/upload/ledger", body, true).await
+}
+
+/// Gzip, sign, and POST every character's gold, bags and bank to `/v1/upload/inventory`
+/// (0.2.30), for the net worth page.
+#[tauri::command]
+async fn upload_inventory(app: AppHandle, body: String) -> Result<UploadResult, String> {
+    signed_post(&app, "/v1/upload/inventory", body, true).await
 }
 
 /// Gzip, sign, and POST the Rank Points the addon read on the player's own characters to
@@ -926,6 +987,8 @@ pub struct RefreshResult {
     pub contribution: Option<Contribution>,
     /// The account watchlist written for the addon, when the server answered.
     pub watch: Option<WatchSummary>,
+    /// The account's shopping lists written for the addon, when the server answered (0.2.30).
+    pub lists: Option<ListsSummary>,
     /// Characters in the PvP table written for the tooltip, when the server had one.
     pub pvp: Option<usize>,
     /// Why the PvP table could not be refreshed this time, when it could not (0.2.27). The last
@@ -1045,6 +1108,160 @@ async fn sync_watch(app: &AppHandle, body: String) -> Option<WatchAnswer> {
     serde_json::from_str::<WatchAnswer>(&res.body).ok()
 }
 
+/// The server's answer to `/v1/upload/lists`: the account's shopping lists, whole (0.2.30).
+#[derive(Deserialize, Default)]
+struct ListsAnswer {
+    #[serde(default)]
+    linked: bool,
+    #[serde(default)]
+    at: u64,
+    #[serde(default)]
+    lists: Vec<ListDoc>,
+}
+#[derive(Deserialize)]
+struct ListDoc {
+    #[serde(default)]
+    id: u64,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    items: Vec<ListItemDoc>,
+}
+#[derive(Deserialize)]
+struct ListItemDoc {
+    #[serde(default)]
+    id: u64,
+    #[serde(default)]
+    qty: u64,
+    #[serde(default)]
+    max: Option<u64>,
+    #[serde(default)]
+    bought: u64,
+    #[serde(default)]
+    at: Option<u64>,
+}
+
+/// What the webview shows about the shopping lists written.
+#[derive(Serialize, Clone, Copy)]
+pub struct ListsSummary {
+    pub linked: bool,
+    pub lists: usize,
+    pub items: usize,
+}
+
+const LISTS_MAX: usize = 20;
+const LIST_ITEMS_MAX: usize = 100;
+const LIST_NAME_MAX: usize = 40;
+
+/// A list name the addon can show: letters and digits in any script, spaces and the site's
+/// punctuation, at most 40 characters; anything else (quotes, backslashes, brackets, pipes,
+/// control characters) is dropped, so the name cannot end the Lua string it is written into.
+fn clean_list_name(name: &str) -> String {
+    let mut out = String::new();
+    let mut last_space = true;
+    let mut n = 0;
+    for c in name.chars() {
+        if n >= LIST_NAME_MAX {
+            break;
+        }
+        let keep = c.is_alphanumeric()
+            || matches!(c, '\'' | '-' | '_' | '.' | ',' | '(' | ')' | '&' | '+' | '#' | '!' | '?');
+        if c.is_whitespace() {
+            if !last_space {
+                out.push(' ');
+                n += 1;
+                last_space = true;
+            }
+        } else if keep {
+            out.push(c);
+            n += 1;
+            last_space = false;
+        }
+    }
+    let trimmed = out.trim_end().to_string();
+    if trimmed.is_empty() {
+        "List".to_string()
+    } else {
+        trimmed
+    }
+}
+
+/// The Lua block the addon reads for shopping lists: numbers, and names cleaned to a fixed set
+/// of characters, so nothing from the network can change what the file means.
+fn render_lists(a: &ListsAnswer) -> String {
+    let mut lists = Vec::new();
+    for l in a.lists.iter().filter(|l| l.id > 0 && l.id < 2_147_483_648).take(LISTS_MAX) {
+        let mut items = Vec::new();
+        for i in l
+            .items
+            .iter()
+            .filter(|i| i.id > 0 && i.id < 100_000_000 && i.qty > 0)
+            .take(LIST_ITEMS_MAX)
+        {
+            items.push(format!(
+                "{{ id = {}, qty = {}, max = {}, bought = {}, at = {} }}",
+                i.id,
+                i.qty.min(10_000),
+                i.max.unwrap_or(0).min(1_000_000_000),
+                i.bought.min(1_000_000),
+                i.at.unwrap_or(0).min(4_000_000_000)
+            ));
+        }
+        lists.push(format!(
+            "{{ id = {}, name = \"{}\", items = {{ {} }} }}",
+            l.id,
+            clean_list_name(&l.name),
+            items.join(", ")
+        ));
+    }
+    format!(
+        "AHledgerData.lists = {{ at = {}, lists = {{ {} }} }}
+",
+        a.at.min(4_000_000_000),
+        lists.join(", ")
+    )
+}
+
+/// What the lists call came back with.
+enum ListsFetch {
+    /// The account's lists (or `linked: false`), with the body as received for the cache.
+    Answer(ListsAnswer, String),
+    /// No key, or the key was refused: the lists go.
+    Gone,
+    /// Offline, a timeout, a server error: the lists from the last answer stay.
+    Failed,
+}
+
+/// Sorts a lists call result. Only a missing or refused key removes the lists; anything that
+/// can pass on its own (network, 5xx, an older server) keeps the last answer.
+fn classify_lists(res: Result<UploadResult, String>) -> ListsFetch {
+    match res {
+        Err(e) if e == "upload key is not configured" => ListsFetch::Gone,
+        Err(_) => ListsFetch::Failed,
+        Ok(r) if r.status == 401 || r.status == 403 => ListsFetch::Gone,
+        Ok(r) if r.status != 200 => ListsFetch::Failed,
+        Ok(r) => match serde_json::from_str::<ListsAnswer>(&r.body) {
+            Ok(a) => ListsFetch::Answer(a, r.body),
+            Err(_) => ListsFetch::Failed,
+        },
+    }
+}
+
+/// The last lists answer, kept so a passing failure does not empty the lists in game. It is
+/// parsed and rendered again like a fresh answer, so nothing from it reaches the data file
+/// except numbers and cleaned names.
+fn lists_cache_path(app: &AppHandle) -> Option<PathBuf> {
+    let dir = app.path().app_config_dir().ok()?;
+    fs::create_dir_all(&dir).ok()?;
+    Some(dir.join("lists.json"))
+}
+
+/// Sends what the addon counted as bought and returns the account's lists. No key, offline,
+/// an older server, or a refusal: none, and the file carries no block.
+async fn sync_lists(app: &AppHandle, body: String) -> ListsFetch {
+    classify_lists(signed_post(app, "/v1/upload/lists", body, false).await)
+}
+
 /// Asks the site what this key contributed. No key yet, offline, or an older server: none,
 /// and the tables are written without the line.
 async fn fetch_contribution(app: &AppHandle) -> Option<Contribution> {
@@ -1063,6 +1280,7 @@ async fn fetch_contribution(app: &AppHandle) -> Option<Contribution> {
 async fn refresh_price_tables(
     app: AppHandle,
     watch: Option<String>,
+    lists: Option<String>,
     region: Option<String>,
 ) -> Result<RefreshResult, String> {
     let settings = load_settings(&app)?;
@@ -1084,7 +1302,7 @@ async fn refresh_price_tables(
         .get(format!("{base}/v1/markets"))
         .send()
         .await
-        .map_err(err)?
+        .map_err(net_err)?
         .error_for_status()
         .map_err(err)?
         .text()
@@ -1141,6 +1359,55 @@ async fn refresh_price_tables(
             out.push_str(&render_watch(a));
         }
     }
+    // Shopping lists, when the webview read the saved file and the key has an account.
+    // Shopping lists (WoW Forever): a body is sent and the answer written; an empty body means
+    // the saved file could not be read this time, so the last answer is written again; none
+    // means no lists for this file (another game).
+    let cache = lists_cache_path(&app);
+    let lists_answer: Option<ListsAnswer> = match lists {
+        None => None,
+        Some(body) => {
+            let fetched = if body.is_empty() {
+                ListsFetch::Failed
+            } else {
+                sync_lists(&app, body).await
+            };
+            match fetched {
+                ListsFetch::Answer(a, raw) => {
+                    if let Some(p) = cache.as_ref() {
+                        let _ = if a.linked { fs::write(p, raw) } else { fs::remove_file(p) };
+                    }
+                    Some(a)
+                }
+                ListsFetch::Gone => {
+                    if let Some(p) = cache.as_ref() {
+                        let _ = fs::remove_file(p);
+                    }
+                    None
+                }
+                ListsFetch::Failed => cache
+                    .as_ref()
+                    .and_then(|p| fs::read_to_string(p).ok())
+                    .and_then(|t| serde_json::from_str::<ListsAnswer>(&t).ok()),
+            }
+        }
+    };
+    let mut lists_summary = None;
+    if let Some(a) = lists_answer.as_ref() {
+        if a.linked {
+            out.push_str(&render_lists(a));
+        }
+        lists_summary = Some(ListsSummary {
+            linked: a.linked,
+            lists: a.lists.len().min(LISTS_MAX),
+            items: a
+                .lists
+                .iter()
+                .take(LISTS_MAX)
+                .map(|l| l.items.len().min(LIST_ITEMS_MAX))
+                .sum(),
+        });
+    }
     write_replace(&target, "lua.tmp", out.as_bytes(), false)?;
     Ok(RefreshResult {
         path: target.to_string_lossy().into_owned(),
@@ -1154,6 +1421,7 @@ async fn refresh_price_tables(
             saved_at: a.saved_at,
             items: a.items.len(),
         }),
+        lists: lists_summary,
         pvp: pvp_rows,
         pvp_error,
     })
@@ -1228,7 +1496,7 @@ async fn fetch_price_table(
     }
     let res = match req.send().await {
         Ok(r) => r,
-        Err(e) => return kept(err(e)),
+        Err(e) => return kept(net_err(e)),
     };
     let status = res.status().as_u16();
     if status == 304 {
@@ -1287,7 +1555,7 @@ async fn fetch_pvp_table(
     }
     let res = match req.send().await {
         Ok(r) => r,
-        Err(e) => return from_cache(format!("download failed: {e}")),
+        Err(e) => return from_cache(format!("download failed: {}", net_err(e))),
     };
     let status = res.status().as_u16();
     if status == 304 {
@@ -1311,7 +1579,7 @@ async fn fetch_pvp_table(
         .is_some_and(|v| v.eq_ignore_ascii_case("gzip"));
     let bytes = match res.bytes().await {
         Ok(b) => b,
-        Err(e) => return from_cache(format!("download failed: {e}")),
+        Err(e) => return from_cache(format!("download failed: {}", net_err(e))),
     };
     let text = if gzipped {
         use std::io::Read;
@@ -1546,6 +1814,7 @@ pub fn run() {
             check_key,
             upload_observations,
             upload_ledger,
+            upload_inventory,
             upload_sightings,
             upload_pvp_points,
             check_for_update,
@@ -1571,6 +1840,38 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+
+    /// Live check of the text a player sees (network needed, so ignored by default): a site
+    /// with an untrusted root names the certificate, and ahledger.com still connects with the
+    /// Windows store added to the bundled roots.
+    #[test]
+    #[ignore]
+    fn net_err_reads_a_real_failure() {
+        tauri::async_runtime::block_on(async {
+            let client = reqwest::Client::builder().build().unwrap();
+            let e = client.get("https://untrusted-root.badssl.com/").send().await.unwrap_err();
+            let text = super::net_err(e);
+            println!("{text}");
+            assert!(text.contains("antivirus HTTPS"), "{text}");
+            let ok = client.get("https://api.ahledger.com/v1/markets").send().await.unwrap();
+            assert!(ok.status().is_success());
+        });
+    }
+
+    #[test]
+    fn net_hint_names_the_usual_causes() {
+        let cert = "error sending request for url (https://api.ahledger.com/v1/markets): client error (Connect): invalid peer certificate: UnknownIssuer";
+        assert!(super::net_hint(cert).unwrap().contains("antivirus HTTPS"));
+        let blocked = "error sending request for url (https://ahledger.com/api/pair/start): client error (Connect): tcp connect error: An attempt was made to access a socket in a way forbidden by its access permissions. (os error 10013)";
+        assert!(super::net_hint(blocked).unwrap().contains("firewall"));
+        let refused = "error sending request: tcp connect error: No connection could be made because the target machine actively refused it. (os error 10061)";
+        assert!(super::net_hint(refused).unwrap().contains("firewall"));
+        let dns = "error sending request: client error (Connect): dns error: No such host is known. (os error 11001)";
+        assert!(super::net_hint(dns).unwrap().contains("look up"));
+        let slow = "error sending request: operation timed out";
+        assert!(super::net_hint(slow).unwrap().contains("timed out"));
+        assert!(super::net_hint("error decoding response body").is_none());
+    }
     #[test]
     fn a_settings_file_from_before_the_background_options_has_both_off() {
         let old = r#"{"apiUrl":"https://api.ahledger.com","keyId":"ahl_abcdefghij012345","secret":"s","savedVariablesPath":"C:/x/AHledger.lua","game":"forever","region":"us","autoUpload":true}"#;
@@ -1713,6 +2014,57 @@ mod tests {
             render_watch(&empty),
             "AHledgerData.watch = { at = 5, savedAt = 0, items = {  }, dropped = {  } }\n"
         );
+    }
+
+    #[test]
+    fn lists_render_numbers_and_clean_names_only() {
+        use super::{
+            classify_lists, clean_list_name, render_lists, ListDoc, ListsAnswer, ListsFetch,
+            UploadResult, LISTS_MAX,
+        };
+        let body = r#"{"ok":true,"linked":true,"at":1790000100,"lists":[
+          {"id":12,"name":"Raid \" } os.exit() -- \\ [[x]] |cff night","items":[
+            {"id":2589,"qty":20,"max":1200,"bought":4,"at":1790000000},
+            {"id":2592,"qty":99999,"max":null,"bought":0,"at":null},
+            {"id":0,"qty":1},{"id":7,"qty":0}]},
+          {"id":0,"name":"no id","items":[]},
+          {"id":15,"name":"   ","items":[]}]}"#;
+        let a: ListsAnswer = serde_json::from_str(body).unwrap();
+        assert_eq!(
+            render_lists(&a),
+            "AHledgerData.lists = { at = 1790000100, lists = { { id = 12, name = \"Raid os.exit() -- x cff night\", items = { { id = 2589, qty = 20, max = 1200, bought = 4, at = 1790000000 }, { id = 2592, qty = 10000, max = 0, bought = 0, at = 0 } } }, { id = 15, name = \"List\", items = {  } } } }
+"
+        );
+        assert_eq!(clean_list_name(&"é".repeat(60)).chars().count(), 40);
+        assert_eq!(clean_list_name("Fish & chips (x2)!"), "Fish & chips (x2)!");
+        assert_eq!(clean_list_name("a
+b	c"), "a b c");
+        // An older server, or an unlinked key, answers without lists.
+        let bare: ListsAnswer = serde_json::from_str(r#"{"linked":false}"#).unwrap();
+        assert!(!bare.linked && bare.lists.is_empty());
+        let many = ListsAnswer {
+            linked: true,
+            at: 1,
+            lists: (1..=30).map(|i| ListDoc { id: i, name: format!("L{i}"), items: vec![] }).collect(),
+        };
+        assert_eq!(render_lists(&many).matches("name = ").count(), LISTS_MAX);
+        // Only a missing or refused key removes the lists; passing failures keep the last answer.
+        let ok = |status: u16, body: &str| {
+            Ok(UploadResult { status, body: body.to_string(), sent_ts: 0, clock_offset: 0 })
+        };
+        assert!(matches!(
+            classify_lists(Err("upload key is not configured".into())),
+            ListsFetch::Gone
+        ));
+        assert!(matches!(classify_lists(Err("timed out".into())), ListsFetch::Failed));
+        assert!(matches!(classify_lists(ok(401, "")), ListsFetch::Gone));
+        assert!(matches!(classify_lists(ok(403, "")), ListsFetch::Gone));
+        assert!(matches!(classify_lists(ok(503, "")), ListsFetch::Failed));
+        assert!(matches!(classify_lists(ok(200, "not json")), ListsFetch::Failed));
+        assert!(matches!(
+            classify_lists(ok(200, r#"{"ok":true,"linked":false,"at":1,"lists":[]}"#)),
+            ListsFetch::Answer(ref a, _) if !a.linked
+        ));
     }
 
     #[test]

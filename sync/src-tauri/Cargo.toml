@@ -1,6 +1,6 @@
 [package]
 name = "ahledger-sync"
-version = "0.2.29"
+version = "0.2.32"
 description = "AHledger sync: uploads addon auction house scans to ahledger.com"
 authors = ["AHledger"]
 license = "MIT"
@@ -21,7 +21,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 notify = "6"
 notify-debouncer-mini = "0.4"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+# rustls with both root sets: the bundled Mozilla list, and the Windows (or macOS) store, so
+# antivirus HTTPS scanning and company proxies, whose roots live only in the system store, work
+# the way they do in the browser.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "rustls-tls-native-roots"] }
 hmac = "0.12"
 sha2 = "0.10"
 hex = "0.4"

@@ -292,11 +292,13 @@ local function ensureWindow()
   window.tabButtons = {}
   window.bodies = {}
   local x = 16
+  -- As wide as six tabs were, narrower when there are more, so the row fits the window.
+  local tabW = math.min(104, math.floor((WIDTH - 32 - (#NS.Tabs - 1) * 4) / #NS.Tabs))
   for _, t in ipairs(NS.Tabs) do
-    local b = UI.Button(window, t.label, 104, function() showTab(t.key) end)
+    local b = UI.Button(window, t.label, tabW, function() showTab(t.key) end)
     b:SetPoint("TOPLEFT", x, -84)
     window.tabButtons[t.key] = b
-    x = x + 108
+    x = x + tabW + 4
     local body = CreateFrame("Frame", nil, window)
     body:SetPoint("TOPLEFT", 16, CONTENT_TOP - 8)
     body:SetPoint("BOTTOMRIGHT", -16, CONTENT_BOTTOM)
